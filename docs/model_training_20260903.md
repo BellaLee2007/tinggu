@@ -11,10 +11,14 @@
 - `scripts/validate_advanced_recrop.py`：5 折分组验证。
 - `scripts/fit_advanced_candidates.py`：用当前批次拟合并导出模型。
 - `scripts/plot_new_batch_confusion.py`：生成混淆矩阵热力图。
+- `firmware/tinggu_edge_runtime/`：已部署40特征LDA的ESP32-S3双核固件。
+- `scripts/generate_lda_header.py`：从JSON重新生成端侧模型参数头文件。
 
 ## 当前验证结果
 
 最佳配置为三模型 soft-vote、每 4 个相邻 measurement 分组：measurement 级准确率 83.44% ± 0.61%，macro-F1 83.11%；完整三敲子集准确率 81.46% ± 1.34%。medium/loose 仍是主要混淆对，结果需要后续独立 session 盲测确认。
+
+端侧采用更适合ESP32-S3的 `candidate_spectral_lda40`：每敲截取触发后240 ms，计算40项频谱、分时频带和跨传感器特征，三次敲击分别推理后平均类别概率。其同日分组验证 measurement 级准确率约81.8%；最终置信度低于0.50时固件输出 `UNCERTAIN`。
 
 ## 本地复现
 
