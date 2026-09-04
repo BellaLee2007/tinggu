@@ -43,7 +43,8 @@ const uint32_t MPU_SAMPLE_RATE_HZ = 1000;
 const uint16_t PRE_TRIGGER_MS = 100;
 const uint16_t POST_TRIGGER_MS = 900;
 const uint16_t REFRACTORY_MS = 200;
-const uint16_t MEASUREMENT_TIMEOUT_MS = 5000;
+const uint16_t STRIKE_PREPARE_MS = 2000;
+const uint16_t STRIKE_TIMEOUT_MS = 5000;
 
 const uint16_t MIN_TRIGGER_COUNTS = 80;
 const float TRIGGER_NOISE_MULTIPLIER = 6.0f;
@@ -85,6 +86,7 @@ enum SystemState {
   STATE_SELF_TEST,
   STATE_CALIBRATING,
   STATE_IDLE,
+  STATE_STRIKE_PREPARING,
   STATE_MEASUREMENT_ARMED,
   STATE_CAPTURING,
   STATE_PROCESSING,
@@ -185,7 +187,9 @@ volatile SystemState systemState = STATE_BOOT;
 volatile uint32_t activeMeasurementId = 0;
 volatile uint8_t capturedHitCount = 0;
 volatile uint8_t processedHitCount = 0;
-volatile uint32_t measurementStartMs = 0;
+volatile uint32_t strikePrepareStartMs = 0;
+volatile uint32_t strikeWaitStartMs = 0;
+volatile uint8_t preparingStrikeNumber = 0;
 volatile uint32_t refractoryUntilMs = 0;
 volatile bool recalibrationRequested = false;
 
@@ -232,6 +236,7 @@ const char *stateName(SystemState state) {
     case STATE_SELF_TEST: return "SELF_TEST";
     case STATE_CALIBRATING: return "CALIBRATING";
     case STATE_IDLE: return "IDLE";
+    case STATE_STRIKE_PREPARING: return "STRIKE_PREPARING";
     case STATE_MEASUREMENT_ARMED: return "MEASUREMENT_ARMED";
     case STATE_CAPTURING: return "CAPTURING";
     case STATE_PROCESSING: return "PROCESSING";
@@ -457,20 +462,31 @@ void resetCalibration() {
   systemState = STATE_CALIBRATING;
 }
 
-void armMeasurement() {
+void announceStrikePreparation(uint8_t strikeNumber) {
+  serialPrintf("#PROMPT,PREPARE_STRIKE,index=%u,total=%u,countdown_ms=%u\n",
+    strikeNumber, HITS_PER_MEASUREMENT, STRIKE_PREPARE_MS);
+  tingguDisplayState("PREPARE_STRIKE");
+}
+
+bool armMeasurement() {
+  bool started = false;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   if (systemState == STATE_IDLE || systemState == STATE_RESULT_HOLDING) {
     ++activeMeasurementId;
     capturedHitCount = 0;
     processedHitCount = 0;
-    measurementStartMs = millis();
+    preparingStrikeNumber = 1;
+    strikePrepareStartMs = millis();
+    strikeWaitStartMs = 0;
     refractoryUntilMs = 0;
     memset(hitResults, 0, sizeof(hitResults));
     memset(&latestResult, 0, sizeof(latestResult));
     latestResult.measurementId = activeMeasurementId;
-    systemState = STATE_MEASUREMENT_ARMED;
+    systemState = STATE_STRIKE_PREPARING;
+    started = true;
   }
   xSemaphoreGive(stateMutex);
+  return started;
 }
 
 void abortMeasurement() {
@@ -478,6 +494,7 @@ void abortMeasurement() {
   ++activeMeasurementId; // Invalidates any event that was already queued.
   capturedHitCount = 0;
   processedHitCount = 0;
+  preparingStrikeNumber = 0;
   systemState = STATE_IDLE;
   xSemaphoreGive(stateMutex);
 }
@@ -569,7 +586,7 @@ void acquisitionTask(void *parameter) {
       }
 
       if (systemState == STATE_MEASUREMENT_ARMED) {
-        if (millis() - measurementStartMs > MEASUREMENT_TIMEOUT_MS) {
+        if (millis() - strikeWaitStartMs > STRIKE_TIMEOUT_MS) {
           systemState = STATE_RESULT_HOLDING;
           postRuntimeEvent(EVENT_MEASUREMENT_TIMEOUT, capturedHitCount + 1, 0);
         } else if ((int32_t)(millis() - refractoryUntilMs) >= 0) {
@@ -595,7 +612,7 @@ void acquisitionTask(void *parameter) {
             postRuntimeEvent(EVENT_READY_QUEUE_FULL, event.hitNumber, 0);
           } else {
             postRuntimeEvent(EVENT_HIT_CAPTURED, event.hitNumber, event.piezoCount);
-            systemState = capturedHitCount >= HITS_PER_MEASUREMENT ? STATE_PROCESSING : STATE_MEASUREMENT_ARMED;
+            systemState = STATE_PROCESSING;
           }
           activeBuffer = -1;
         }
@@ -1113,11 +1130,11 @@ HitAnalysis analyzeHit(const EventBuffer &event) {
   result.dropRate = expectedMpu > 0 ? max(0.0f, 1.0f - event.mpuCount / (float)expectedMpu) : 1.0f;
   if (event.dmaOverflowCount > 0) result.dropRate = 1.0f;
 
-  result.qualityValid = !result.piezoSaturated && !result.mpuSaturated &&
-    result.piezoSnrDb >= PIEZO_MIN_SNR_DB && result.mpuSnrDb >= MPU_MIN_SNR_DB &&
-    result.dropRate < MAX_DROP_RATE && mpuAvailable;
   result.modelReady = extractSpectralModelFeatures(event, result.modelFeatures);
   if (result.modelReady) result.model = inferTingguModel(result.modelFeatures);
+  result.qualityValid = !result.piezoSaturated && !result.mpuSaturated &&
+    result.piezoSnrDb >= PIEZO_MIN_SNR_DB && result.mpuSnrDb >= MPU_MIN_SNR_DB &&
+    result.dropRate < MAX_DROP_RATE && mpuAvailable && result.modelReady;
   result.complete = true;
   return result;
 }
@@ -1160,6 +1177,14 @@ void finishMeasurementIfReady() {
                       latestResult.model.confidence);
 }
 
+void beginNextStrikePreparation(uint8_t strikeNumber) {
+  preparingStrikeNumber = strikeNumber;
+  strikePrepareStartMs = millis();
+  strikeWaitStartMs = 0;
+  systemState = STATE_STRIKE_PREPARING;
+  announceStrikePreparation(strikeNumber);
+}
+
 void processingTask(void *parameter) {
   (void)parameter;
   for (;;) {
@@ -1170,6 +1195,11 @@ void processingTask(void *parameter) {
       xQueueSend(freeBufferQueue, &bufferIndex, portMAX_DELAY);
       continue;
     }
+    if (event.hitNumber == HITS_PER_MEASUREMENT) {
+      serialPrintf("#PROMPT,MODEL_ANALYZING,measurement_id=%lu\n",
+        (unsigned long)event.measurementId);
+      tingguDisplayState("MODEL_ANALYZING");
+    }
     HitAnalysis analysis = analyzeHit(event);
     uint8_t resultIndex = event.hitNumber > 0 ? event.hitNumber - 1 : 0;
     if (resultIndex < HITS_PER_MEASUREMENT) hitResults[resultIndex] = analysis;
@@ -1178,12 +1208,25 @@ void processingTask(void *parameter) {
       (unsigned long)event.measurementId, event.hitNumber, analysis.qualityValid ? 1 : 0,
       analysis.piezoSnrDb, analysis.mpuSnrDb, analysis.dropRate,
       analysis.f1Hz, analysis.tauMs, analysis.energyRatio);
-    serialPrintf("#HIT_MODEL,measurement_id=%lu,strike_index=%u,ready=%d,class=%s,confidence=%.4f,p_tight=%.5f,p_medium=%.5f,p_loose=%.5f\n",
+    serialPrintf("#STRIKE_RESULT,measurement_id=%lu,strike_index=%u,grade=%s,counted=%d,piezo_saturated=%d,mpu_saturated=%d,piezo_snr_ok=%d,mpu_snr_ok=%d,drop_rate_ok=%d,model_ready=%d\n",
+      (unsigned long)event.measurementId, event.hitNumber,
+      analysis.qualityValid ? "A" : "INVALID", analysis.qualityValid ? 1 : 0,
+      analysis.piezoSaturated ? 1 : 0, analysis.mpuSaturated ? 1 : 0,
+      analysis.piezoSnrDb >= PIEZO_MIN_SNR_DB ? 1 : 0,
+      analysis.mpuSnrDb >= MPU_MIN_SNR_DB ? 1 : 0,
+      analysis.dropRate < MAX_DROP_RATE ? 1 : 0, analysis.modelReady ? 1 : 0);
+    serialPrintf("#HIT_MODEL,measurement_id=%lu,strike_index=%u,ready=%d,counted=%d,class=%s,confidence=%.4f,p_tight=%.5f,p_medium=%.5f,p_loose=%.5f\n",
       (unsigned long)event.measurementId, event.hitNumber, analysis.modelReady ? 1 : 0,
-      tingguClassName(analysis.model.classification), analysis.model.confidence,
+      analysis.qualityValid ? 1 : 0,
+      analysis.qualityValid ? tingguClassName(analysis.model.classification) : "NOT_COUNTED",
+      analysis.model.confidence,
       analysis.model.probabilities[0], analysis.model.probabilities[1], analysis.model.probabilities[2]);
     xQueueSend(freeBufferQueue, &bufferIndex, portMAX_DELAY);
-    finishMeasurementIfReady();
+    if (event.hitNumber < HITS_PER_MEASUREMENT) {
+      beginNextStrikePreparation(event.hitNumber + 1);
+    } else {
+      finishMeasurementIfReady();
+    }
   }
 }
 
@@ -1202,8 +1245,14 @@ void printStatus() {
 
 void handleCommand(const char *command) {
   if (strcmp(command, "ARM_MEASUREMENT") == 0 || strcmp(command, "ARM") == 0) {
-    armMeasurement();
-    serialPrintf("#ACK,ARM_MEASUREMENT\n");
+    if (armMeasurement()) {
+      serialPrintf("#ACK,ARM_MEASUREMENT\n");
+      serialPrintf("#PROMPT,START_TEST,measurement_id=%lu,total_strikes=%u\n",
+        (unsigned long)activeMeasurementId, HITS_PER_MEASUREMENT);
+      announceStrikePreparation(1);
+    } else {
+      serialPrintf("#ERROR,ARM_REJECTED,state=%s\n", stateName(systemState));
+    }
   } else if (strcmp(command, "ABORT") == 0) {
     abortMeasurement();
     serialPrintf("#ACK,ABORT\n");
@@ -1290,6 +1339,15 @@ void setup() {
 
 void loop() {
   processSerial();
+  if (systemState == STATE_STRIKE_PREPARING &&
+      millis() - strikePrepareStartMs >= STRIKE_PREPARE_MS) {
+    strikeWaitStartMs = millis();
+    uint8_t strikeNumber = preparingStrikeNumber;
+    systemState = STATE_MEASUREMENT_ARMED;
+    serialPrintf("#PROMPT,STRIKE_NOW,index=%u,total=%u,timeout_ms=%u\n",
+      strikeNumber, HITS_PER_MEASUREMENT, STRIKE_TIMEOUT_MS);
+    tingguDisplayState("STRIKE_NOW");
+  }
   RuntimeEvent event;
   while (runtimeEventQueue && xQueueReceive(runtimeEventQueue, &event, 0) == pdTRUE) {
     switch (event.type) {
@@ -1323,7 +1381,11 @@ void loop() {
   static bool lastButton = false;
   if (ARM_BUTTON_PIN >= 0) {
     bool pressed = digitalRead(ARM_BUTTON_PIN) == (ARM_BUTTON_ACTIVE_LOW ? LOW : HIGH);
-    if (pressed && !lastButton) armMeasurement();
+    if (pressed && !lastButton && armMeasurement()) {
+      serialPrintf("#PROMPT,START_TEST,measurement_id=%lu,total_strikes=%u\n",
+        (unsigned long)activeMeasurementId, HITS_PER_MEASUREMENT);
+      announceStrikePreparation(1);
+    }
     lastButton = pressed;
   }
 

@@ -19,9 +19,9 @@
 
 1. 当前ESP32-S3接口为 `PIEZO_ADC_PIN=4`（ADC1_CH3）、`MPU_SDA_PIN=17`、`MPU_SCL_PIN=15`；完整模拟前端见 `docs/tonight_bringup_wiring.md`。
 2. 上电标定的一秒内保持铁板静止。
-3. 串口发送 `ARM_MEASUREMENT`，然后用外部撞针敲三次。
+3. 串口发送 `ARM_MEASUREMENT`。每一敲先输出 `PREPARE_STRIKE` 并倒计时2秒，看到 `STRIKE_NOW` 后再按撞针；每一敲单独有5秒等待时间。
 4. 当前模型为 `spectral_lda40_20260903`，类别为 `TIGHT/MEDIUM/LOOSE`；最终置信度低于0.50时输出 `UNCERTAIN`。
-5. `#HIT_MODEL`输出每次敲击的概率；`#MEASUREMENT_RESULT`输出三次概率平均后的类别。
+5. `#STRIKE_RESULT`把满足质量门控的敲击标为A级并计入；任一敲无效时仍完成后续两敲，但整组不输出松紧类别。`#HIT_MODEL`输出单敲调试概率，`#MEASUREMENT_RESULT`输出三次A级敲击概率平均后的类别。
 6. 当前模型的同日分组验证准确率约81.8%，仍必须用下一次独立实验验证，不能把它当作最终准确率。
 7. 当前 `display_interface.h` 是空实现；OLED准确型号、地址和引脚冻结后再接库。
 
