@@ -17,7 +17,7 @@
 
 ## 当前硬件接口
 
-1. 当前ESP32-S3接口为 `PIEZO_ADC_PIN=14`、`MPU_SDA_PIN=17`、`MPU_SCL_PIN=15`；完整模拟前端见 `docs/tonight_bringup_wiring.md`。
+1. 当前ESP32-S3接口为 `PIEZO_ADC_PIN=4`（ADC1_CH3）、`MPU_SDA_PIN=17`、`MPU_SCL_PIN=15`；完整模拟前端见 `docs/tonight_bringup_wiring.md`。
 2. 上电标定的一秒内保持铁板静止。
 3. 串口发送 `ARM_MEASUREMENT`，然后用外部撞针敲三次。
 4. 当前模型为 `spectral_lda40_20260903`，类别为 `TIGHT/MEDIUM/LOOSE`；最终置信度低于0.50时输出 `UNCERTAIN`。

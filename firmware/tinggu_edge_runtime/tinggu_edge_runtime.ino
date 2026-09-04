@@ -26,7 +26,7 @@
 // ---------------------------------------------------------------------------
 // User-editable hardware and experiment configuration
 // ---------------------------------------------------------------------------
-const int PIEZO_ADC_PIN = 14;       // Current ESP32-S3 wiring.
+const int PIEZO_ADC_PIN = 4;        // ESP32-S3 ADC1_CH3; continuous DMA requires ADC1.
 const int MPU_SDA_PIN = 17;
 const int MPU_SCL_PIN = 15;
 const uint8_t MPU_ADDRESS = 0;      // 0 = auto-detect 0x68/0x69.
@@ -196,6 +196,9 @@ uint16_t piezoTriggerThreshold = MIN_TRIGGER_COUNTS;
 adc_continuous_handle_t adcHandle = NULL;
 volatile uint32_t adcPoolOverflowCount = 0;
 adc_channel_t piezoAdcChannel;
+adc_unit_t piezoAdcUnit = ADC_UNIT_1;
+esp_err_t adcInitError = ESP_OK;
+const char *adcInitStage = "not_started";
 TaskHandle_t acquisitionTaskHandle = NULL;
 TaskHandle_t mpuTaskHandle = NULL;
 TaskHandle_t processingTaskHandle = NULL;
@@ -391,27 +394,28 @@ bool IRAM_ATTR onAdcPoolOverflow(adc_continuous_handle_t handle,
 }
 
 bool beginAdcDma() {
-  adc_unit_t unit;
-  if (adc_continuous_io_to_channel(PIEZO_ADC_PIN, &unit, &piezoAdcChannel) != ESP_OK || unit != ADC_UNIT_1) {
-    return false;
-  }
+  adcInitStage = "io_to_channel";
+  adcInitError = adc_continuous_io_to_channel(PIEZO_ADC_PIN, &piezoAdcUnit, &piezoAdcChannel);
+  if (adcInitError != ESP_OK) return false;
 
   const uint32_t conversionsPerFrame = 32;
   const uint32_t frameBytes = conversionsPerFrame * SOC_ADC_DIGI_RESULT_BYTES;
   adc_continuous_handle_cfg_t handleConfig = {};
   handleConfig.max_store_buf_size = frameBytes * 8;
   handleConfig.conv_frame_size = frameBytes;
-  if (adc_continuous_new_handle(&handleConfig, &adcHandle) != ESP_OK) return false;
+  adcInitStage = "new_handle";
+  adcInitError = adc_continuous_new_handle(&handleConfig, &adcHandle);
+  if (adcInitError != ESP_OK) return false;
 
   adc_digi_pattern_config_t pattern = {};
   pattern.atten = ADC_ATTEN_DB_12;
   pattern.channel = piezoAdcChannel;
-  pattern.unit = ADC_UNIT_1;
+  pattern.unit = piezoAdcUnit;
   pattern.bit_width = ADC_BITWIDTH_12;
 
   adc_continuous_config_t config = {};
   config.sample_freq_hz = PIEZO_SAMPLE_RATE_HZ;
-  config.conv_mode = ADC_CONV_SINGLE_UNIT_1;
+  config.conv_mode = piezoAdcUnit == ADC_UNIT_1 ? ADC_CONV_SINGLE_UNIT_1 : ADC_CONV_SINGLE_UNIT_2;
 #if CONFIG_IDF_TARGET_ESP32
   config.format = ADC_DIGI_OUTPUT_FORMAT_TYPE1;
 #else
@@ -419,11 +423,19 @@ bool beginAdcDma() {
 #endif
   config.pattern_num = 1;
   config.adc_pattern = &pattern;
-  if (adc_continuous_config(adcHandle, &config) != ESP_OK) return false;
+  adcInitStage = "configure";
+  adcInitError = adc_continuous_config(adcHandle, &config);
+  if (adcInitError != ESP_OK) return false;
   adc_continuous_evt_cbs_t callbacks = {};
   callbacks.on_pool_ovf = onAdcPoolOverflow;
-  if (adc_continuous_register_event_callbacks(adcHandle, &callbacks, NULL) != ESP_OK) return false;
-  return adc_continuous_start(adcHandle) == ESP_OK;
+  adcInitStage = "callbacks";
+  adcInitError = adc_continuous_register_event_callbacks(adcHandle, &callbacks, NULL);
+  if (adcInitError != ESP_OK) return false;
+  adcInitStage = "start";
+  adcInitError = adc_continuous_start(adcHandle);
+  if (adcInitError != ESP_OK) return false;
+  adcInitStage = "ready";
+  return true;
 }
 
 uint16_t adcRawValue(const uint8_t *data) {
@@ -1261,9 +1273,12 @@ void setup() {
 
   if (!beginAdcDma()) {
     systemState = STATE_FAULT;
-    serialPrintf("#FATAL,ADC_DMA_INIT_FAILED\n");
+    serialPrintf("#FATAL,ADC_DMA_INIT_FAILED,pin=%d,stage=%s,error=%s\n",
+      PIEZO_ADC_PIN, adcInitStage, esp_err_to_name(adcInitError));
     return;
   }
+  serialPrintf("#ADC_DMA,READY,pin=%d,unit=%d,channel=%d\n",
+    PIEZO_ADC_PIN, piezoAdcUnit == ADC_UNIT_1 ? 1 : 2, (int)piezoAdcChannel);
 
   tingguDisplayBegin();
   resetCalibration();
