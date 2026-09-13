@@ -1,0 +1,152 @@
+{
+  "dataset": "training_dataset_20260911",
+  "events": 289,
+  "groups": 114,
+  "class_counts": {
+    "loose": 88,
+    "medium": 85,
+    "tight": 116
+  },
+  "features": [
+    "peak_abs",
+    "peak_time_ms",
+    "rms_0_100ms",
+    "rms_100_300ms",
+    "dominant_freq_hz",
+    "spectral_centroid_hz",
+    "low_high_energy_ratio",
+    "decay_tau_ms",
+    "piezo_std",
+    "accel_mag_mean",
+    "accel_mag_std",
+    "gyro_mag_mean",
+    "gyro_mag_std",
+    "mpu_valid_ratio"
+  ],
+  "tree": {
+    "max_depth": 4,
+    "min_leaf": 3
+  },
+  "cv": {
+    "scheme": "5-fold GroupKFold-like stratified by measurement_id",
+    "folds": [
+      {
+        "fold": 1,
+        "train_events": 231,
+        "test_events": 58,
+        "test_groups": 23,
+        "accuracy": 0.8620689655172413,
+        "macro_f1": 0.8490956072351422
+      },
+      {
+        "fold": 2,
+        "train_events": 231,
+        "test_events": 58,
+        "test_groups": 23,
+        "accuracy": 0.8620689655172413,
+        "macro_f1": 0.8389302080985651
+      },
+      {
+        "fold": 3,
+        "train_events": 231,
+        "test_events": 58,
+        "test_groups": 23,
+        "accuracy": 0.9137931034482759,
+        "macro_f1": 0.8957315086347345
+      },
+      {
+        "fold": 4,
+        "train_events": 231,
+        "test_events": 58,
+        "test_groups": 23,
+        "accuracy": 0.8620689655172413,
+        "macro_f1": 0.8562548562548562
+      },
+      {
+        "fold": 5,
+        "train_events": 232,
+        "test_events": 57,
+        "test_groups": 22,
+        "accuracy": 0.8947368421052632,
+        "macro_f1": 0.882059800664452
+      }
+    ],
+    "oof_accuracy": 0.8788927335640139,
+    "oof_macro_f1": 0.8682623439357321,
+    "confusion_matrix": [
+      [
+        113,
+        2,
+        1
+      ],
+      [
+        3,
+        70,
+        12
+      ],
+      [
+        1,
+        16,
+        71
+      ]
+    ],
+    "per_class": {
+      "tight": {
+        "precision": 0.9658119658119658,
+        "recall": 0.9741379310344828,
+        "f1": 0.9699570815450644,
+        "support": 116
+      },
+      "medium": {
+        "precision": 0.7954545454545454,
+        "recall": 0.8235294117647058,
+        "f1": 0.8092485549132947,
+        "support": 85
+      },
+      "loose": {
+        "precision": 0.8452380952380952,
+        "recall": 0.8068181818181818,
+        "f1": 0.8255813953488372,
+        "support": 88
+      }
+    }
+  },
+  "feature_importance_surrogate": [
+    {
+      "feature": "low_high_energy_ratio",
+      "importance": 0.39593908629441626
+    },
+    {
+      "feature": "accel_mag_mean",
+      "importance": 0.16751269035532995
+    },
+    {
+      "feature": "rms_0_100ms",
+      "importance": 0.12588832487309645
+    },
+    {
+      "feature": "rms_100_300ms",
+      "importance": 0.10050761421319797
+    },
+    {
+      "feature": "decay_tau_ms",
+      "importance": 0.06700507614213198
+    },
+    {
+      "feature": "gyro_mag_std",
+      "importance": 0.06192893401015229
+    },
+    {
+      "feature": "gyro_mag_mean",
+      "importance": 0.03857868020304569
+    },
+    {
+      "feature": "piezo_std",
+      "importance": 0.023350253807106598
+    },
+    {
+      "feature": "peak_abs",
+      "importance": 0.019289340101522844
+    }
+  ]
+}

@@ -1,0 +1,134 @@
+{
+  "feature_names": [
+    "peak_abs",
+    "peak_time_ms",
+    "rms_0_100ms",
+    "rms_100_300ms",
+    "dominant_freq_hz",
+    "spectral_centroid_hz",
+    "low_high_energy_ratio",
+    "decay_tau_ms",
+    "piezo_std",
+    "accel_mag_mean",
+    "accel_mag_std",
+    "gyro_mag_mean",
+    "gyro_mag_std",
+    "mpu_valid_ratio"
+  ],
+  "max_depth": 4,
+  "min_leaf": 3,
+  "root": {
+    "pred": 0,
+    "n": 289,
+    "j": 6,
+    "thr": 8.08844077805141,
+    "left": {
+      "pred": 0,
+      "n": 124,
+      "j": 2,
+      "thr": 144.1049348952851,
+      "left": {
+        "pred": 0,
+        "n": 23,
+        "j": 8,
+        "thr": 47.769012244433554,
+        "left": {
+          "pred": 0,
+          "n": 16
+        },
+        "right": {
+          "pred": 1,
+          "n": 7,
+          "j": 0,
+          "thr": 677.0,
+          "left": {
+            "pred": 1,
+            "n": 4
+          },
+          "right": {
+            "pred": 1,
+            "n": 3
+          }
+        }
+      },
+      "right": {
+        "pred": 0,
+        "n": 101,
+        "j": 6,
+        "thr": 7.079452398903953,
+        "left": {
+          "pred": 0,
+          "n": 98
+        },
+        "right": {
+          "pred": 1,
+          "n": 3
+        }
+      }
+    },
+    "right": {
+      "pred": 2,
+      "n": 165,
+      "j": 9,
+      "thr": 1.1344875970794575,
+      "left": {
+        "pred": 1,
+        "n": 66,
+        "j": 7,
+        "thr": 251.95898622647732,
+        "left": {
+          "pred": 1,
+          "n": 54
+        },
+        "right": {
+          "pred": 1,
+          "n": 12,
+          "j": 0,
+          "thr": 999.5,
+          "left": {
+            "pred": 1,
+            "n": 6
+          },
+          "right": {
+            "pred": 2,
+            "n": 6
+          }
+        }
+      },
+      "right": {
+        "pred": 2,
+        "n": 99,
+        "j": 3,
+        "thr": 53.17487969644836,
+        "left": {
+          "pred": 2,
+          "n": 38,
+          "j": 11,
+          "thr": 13.185599437897977,
+          "left": {
+            "pred": 2,
+            "n": 16
+          },
+          "right": {
+            "pred": 1,
+            "n": 22
+          }
+        },
+        "right": {
+          "pred": 2,
+          "n": 61,
+          "j": 12,
+          "thr": 20.39698559737686,
+          "left": {
+            "pred": 2,
+            "n": 8
+          },
+          "right": {
+            "pred": 2,
+            "n": 53
+          }
+        }
+      }
+    }
+  }
+}

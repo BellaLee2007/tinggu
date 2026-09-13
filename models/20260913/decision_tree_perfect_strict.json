@@ -1,0 +1,84 @@
+{
+  "feature_names": [
+    "peak_abs",
+    "peak_time_ms",
+    "rms_0_100ms",
+    "rms_100_300ms",
+    "dominant_freq_hz",
+    "spectral_centroid_hz",
+    "low_high_energy_ratio",
+    "decay_tau_ms",
+    "piezo_std",
+    "accel_mag_mean",
+    "accel_mag_std",
+    "gyro_mag_mean",
+    "gyro_mag_std",
+    "mpu_valid_ratio"
+  ],
+  "max_depth": 4,
+  "min_leaf": 3,
+  "root": {
+    "pred": 2,
+    "n": 93,
+    "j": 6,
+    "thr": 7.68270581823807,
+    "left": {
+      "pred": 0,
+      "n": 31,
+      "j": 1,
+      "thr": 2.5,
+      "left": {
+        "pred": 1,
+        "n": 5
+      },
+      "right": {
+        "pred": 0,
+        "n": 26,
+        "j": 0,
+        "thr": 1349.5,
+        "left": {
+          "pred": 0,
+          "n": 23
+        },
+        "right": {
+          "pred": 0,
+          "n": 3
+        }
+      }
+    },
+    "right": {
+      "pred": 2,
+      "n": 62,
+      "j": 3,
+      "thr": 53.16983134114369,
+      "left": {
+        "pred": 1,
+        "n": 34,
+        "j": 10,
+        "thr": 0.43956076604595196,
+        "left": {
+          "pred": 1,
+          "n": 21
+        },
+        "right": {
+          "pred": 1,
+          "n": 13,
+          "j": 6,
+          "thr": 16.058380632141898,
+          "left": {
+            "pred": 2,
+            "n": 4
+          },
+          "right": {
+            "pred": 1,
+            "n": 9
+          }
+        }
+      },
+      "right": {
+        "pred": 2,
+        "n": 28
+      }
+    }
+  }
+}

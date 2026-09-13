@@ -1,0 +1,292 @@
+{
+  "results": [
+    {
+      "dataset": "training_dataset_20260911",
+      "events": 289,
+      "groups": 114,
+      "class_counts": {
+        "loose": 88,
+        "medium": 85,
+        "tight": 116
+      },
+      "features": [
+        "peak_abs",
+        "peak_time_ms",
+        "rms_0_100ms",
+        "rms_100_300ms",
+        "dominant_freq_hz",
+        "spectral_centroid_hz",
+        "low_high_energy_ratio",
+        "decay_tau_ms",
+        "piezo_std",
+        "accel_mag_mean",
+        "accel_mag_std",
+        "gyro_mag_mean",
+        "gyro_mag_std",
+        "mpu_valid_ratio"
+      ],
+      "tree": {
+        "max_depth": 4,
+        "min_leaf": 3
+      },
+      "cv": {
+        "scheme": "5-fold GroupKFold-like stratified by measurement_id",
+        "folds": [
+          {
+            "fold": 1,
+            "train_events": 231,
+            "test_events": 58,
+            "test_groups": 23,
+            "accuracy": 0.8620689655172413,
+            "macro_f1": 0.8490956072351422
+          },
+          {
+            "fold": 2,
+            "train_events": 231,
+            "test_events": 58,
+            "test_groups": 23,
+            "accuracy": 0.8620689655172413,
+            "macro_f1": 0.8389302080985651
+          },
+          {
+            "fold": 3,
+            "train_events": 231,
+            "test_events": 58,
+            "test_groups": 23,
+            "accuracy": 0.9137931034482759,
+            "macro_f1": 0.8957315086347345
+          },
+          {
+            "fold": 4,
+            "train_events": 231,
+            "test_events": 58,
+            "test_groups": 23,
+            "accuracy": 0.8620689655172413,
+            "macro_f1": 0.8562548562548562
+          },
+          {
+            "fold": 5,
+            "train_events": 232,
+            "test_events": 57,
+            "test_groups": 22,
+            "accuracy": 0.8947368421052632,
+            "macro_f1": 0.882059800664452
+          }
+        ],
+        "oof_accuracy": 0.8788927335640139,
+        "oof_macro_f1": 0.8682623439357321,
+        "confusion_matrix": [
+          [
+            113,
+            2,
+            1
+          ],
+          [
+            3,
+            70,
+            12
+          ],
+          [
+            1,
+            16,
+            71
+          ]
+        ],
+        "per_class": {
+          "tight": {
+            "precision": 0.9658119658119658,
+            "recall": 0.9741379310344828,
+            "f1": 0.9699570815450644,
+            "support": 116
+          },
+          "medium": {
+            "precision": 0.7954545454545454,
+            "recall": 0.8235294117647058,
+            "f1": 0.8092485549132947,
+            "support": 85
+          },
+          "loose": {
+            "precision": 0.8452380952380952,
+            "recall": 0.8068181818181818,
+            "f1": 0.8255813953488372,
+            "support": 88
+          }
+        }
+      },
+      "feature_importance_surrogate": [
+        {
+          "feature": "low_high_energy_ratio",
+          "importance": 0.39593908629441626
+        },
+        {
+          "feature": "accel_mag_mean",
+          "importance": 0.16751269035532995
+        },
+        {
+          "feature": "rms_0_100ms",
+          "importance": 0.12588832487309645
+        },
+        {
+          "feature": "rms_100_300ms",
+          "importance": 0.10050761421319797
+        },
+        {
+          "feature": "decay_tau_ms",
+          "importance": 0.06700507614213198
+        },
+        {
+          "feature": "gyro_mag_std",
+          "importance": 0.06192893401015229
+        },
+        {
+          "feature": "gyro_mag_mean",
+          "importance": 0.03857868020304569
+        },
+        {
+          "feature": "piezo_std",
+          "importance": 0.023350253807106598
+        },
+        {
+          "feature": "peak_abs",
+          "importance": 0.019289340101522844
+        }
+      ]
+    },
+    {
+      "dataset": "training_dataset_20260911_perfect_strict",
+      "events": 93,
+      "groups": 68,
+      "class_counts": {
+        "loose": 35,
+        "medium": 33,
+        "tight": 25
+      },
+      "features": [
+        "peak_abs",
+        "peak_time_ms",
+        "rms_0_100ms",
+        "rms_100_300ms",
+        "dominant_freq_hz",
+        "spectral_centroid_hz",
+        "low_high_energy_ratio",
+        "decay_tau_ms",
+        "piezo_std",
+        "accel_mag_mean",
+        "accel_mag_std",
+        "gyro_mag_mean",
+        "gyro_mag_std",
+        "mpu_valid_ratio"
+      ],
+      "tree": {
+        "max_depth": 4,
+        "min_leaf": 3
+      },
+      "cv": {
+        "scheme": "5-fold GroupKFold-like stratified by measurement_id",
+        "folds": [
+          {
+            "fold": 1,
+            "train_events": 74,
+            "test_events": 19,
+            "test_groups": 14,
+            "accuracy": 0.8421052631578947,
+            "macro_f1": 0.8642533936651584
+          },
+          {
+            "fold": 2,
+            "train_events": 74,
+            "test_events": 19,
+            "test_groups": 14,
+            "accuracy": 0.8947368421052632,
+            "macro_f1": 0.8851540616246498
+          },
+          {
+            "fold": 3,
+            "train_events": 74,
+            "test_events": 19,
+            "test_groups": 14,
+            "accuracy": 0.8947368421052632,
+            "macro_f1": 0.8964368964368964
+          },
+          {
+            "fold": 4,
+            "train_events": 75,
+            "test_events": 18,
+            "test_groups": 13,
+            "accuracy": 0.7777777777777778,
+            "macro_f1": 0.7816627816627816
+          },
+          {
+            "fold": 5,
+            "train_events": 75,
+            "test_events": 18,
+            "test_groups": 13,
+            "accuracy": 0.7222222222222222,
+            "macro_f1": 0.7166666666666667
+          }
+        ],
+        "oof_accuracy": 0.8279569892473119,
+        "oof_macro_f1": 0.8303991406603348,
+        "confusion_matrix": [
+          [
+            24,
+            1,
+            0
+          ],
+          [
+            2,
+            26,
+            5
+          ],
+          [
+            4,
+            4,
+            27
+          ]
+        ],
+        "per_class": {
+          "tight": {
+            "precision": 0.8,
+            "recall": 0.96,
+            "f1": 0.8727272727272728,
+            "support": 25
+          },
+          "medium": {
+            "precision": 0.8387096774193549,
+            "recall": 0.7878787878787878,
+            "f1": 0.8125,
+            "support": 33
+          },
+          "loose": {
+            "precision": 0.84375,
+            "recall": 0.7714285714285715,
+            "f1": 0.8059701492537314,
+            "support": 35
+          }
+        }
+      },
+      "feature_importance_surrogate": [
+        {
+          "feature": "low_high_energy_ratio",
+          "importance": 0.4092664092664093
+        },
+        {
+          "feature": "rms_100_300ms",
+          "importance": 0.23938223938223938
+        },
+        {
+          "feature": "accel_mag_std",
+          "importance": 0.13127413127413126
+        },
+        {
+          "feature": "peak_time_ms",
+          "importance": 0.11969111969111969
+        },
+        {
+          "feature": "peak_abs",
+          "importance": 0.10038610038610038
+        }
+      ]
+    }
+  ]
+}
