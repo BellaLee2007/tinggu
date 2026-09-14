@@ -19,6 +19,8 @@ trained on all events in their respective datasets after grouped evaluation.
 
 ## Files
 
+- `../../scripts/extract_features_20260913.py`: deterministic conversion from
+  event waveform CSV files to the fixed 14-feature contract.
 - `../../scripts/train_decision_tree_20260913.py`: reproducible grouped OOF
   evaluation, final fitting, JSON export, and confusion-matrix generation.
 - `decision_tree_full.json` and `decision_tree_perfect_strict.json`: exported
