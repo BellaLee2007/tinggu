@@ -19,6 +19,8 @@ trained on all events in their respective datasets after grouped evaluation.
 
 ## Files
 
+- `../../scripts/train_decision_tree_20260913.py`: reproducible grouped OOF
+  evaluation, final fitting, JSON export, and confusion-matrix generation.
 - `decision_tree_full.json` and `decision_tree_perfect_strict.json`: exported
   model structure and feature order.
 - `results_full.json` and `results_perfect_strict.json`: detailed metrics,
@@ -26,6 +28,10 @@ trained on all events in their respective datasets after grouped evaluation.
 - `confusion_matrix_full.png` and
   `confusion_matrix_perfect_strict.png`: grouped OOF confusion matrices.
 - `summary.json`: combined machine-readable summary.
+
+The local reproduction command and input feature-table contract are documented
+in `../../docs/model_training_20260913.md`. Raw CSV files are intentionally not
+committed.
 
 The full cleaned dataset model is the current recommended candidate because it
 meets the project target of at least 85% three-class accuracy under the grouped
