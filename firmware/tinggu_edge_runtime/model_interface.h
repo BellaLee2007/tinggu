@@ -1,7 +1,7 @@
 #pragma once
 
 #include <math.h>
-#include "model_parameters.h"
+#include "tree_model_parameters.h"
 
 enum TingguModelClass {
   TINGGU_MODEL_UNCERTAIN = -2,
@@ -23,43 +23,27 @@ inline TingguModelOutput emptyTingguModelOutput() {
   return output;
 }
 
-// Exact deployment form of the StandardScaler + LDA model exported by the
-// model teammate. Feature extraction and ordering live in the main sketch.
-inline TingguModelOutput inferTingguModel(
-    const float features[TINGGU_MODEL_FEATURE_COUNT]) {
-  TingguModelOutput output = emptyTingguModelOutput();
-  float scores[TINGGU_MODEL_CLASS_COUNT];
-  for (unsigned c = 0; c < TINGGU_MODEL_CLASS_COUNT; ++c) {
-    scores[c] = TINGGU_MODEL_INTERCEPTS[c];
+// Producer is a custom double-precision CART, not sklearn. Never cast input to float.
+inline int tingguTreeLeaf(const double *features) {
+  if (!features) return -1;
+  for (unsigned i=0;i<TINGGU_MODEL_FEATURE_COUNT;++i) if (!isfinite(features[i])) return -1;
+  int at=0;
+  for (unsigned steps=0;steps<sizeof(TINGGU_TREE_NODES)/sizeof(TINGGU_TREE_NODES[0]);++steps) {
+    const TingguTreeNode &n=TINGGU_TREE_NODES[at];
+    if(n.feature<0)return at;
+    at=features[n.feature]<=n.threshold?n.left:n.right;
   }
-
-  for (unsigned i = 0; i < TINGGU_MODEL_FEATURE_COUNT; ++i) {
-    float value = isfinite(features[i]) ? features[i] : TINGGU_MODEL_IMPUTER_MEDIAN[i];
-    float scale = fabsf(TINGGU_MODEL_SCALER_SCALE[i]) > 1e-12f ? TINGGU_MODEL_SCALER_SCALE[i] : 1.0f;
-    float standardized = (value - TINGGU_MODEL_SCALER_MEAN[i]) / scale;
-    for (unsigned c = 0; c < TINGGU_MODEL_CLASS_COUNT; ++c) {
-      scores[c] += TINGGU_MODEL_COEFFICIENTS[c * TINGGU_MODEL_FEATURE_COUNT + i] * standardized;
-    }
-  }
-
-  float maximum = scores[0];
-  for (unsigned c = 1; c < TINGGU_MODEL_CLASS_COUNT; ++c) maximum = fmaxf(maximum, scores[c]);
-  float denominator = 0.0f;
-  for (unsigned c = 0; c < TINGGU_MODEL_CLASS_COUNT; ++c) {
-    output.probabilities[c] = expf(scores[c] - maximum);
-    denominator += output.probabilities[c];
-  }
-  if (!(denominator > 0.0f) || !isfinite(denominator)) return emptyTingguModelOutput();
-
-  unsigned best = 0;
-  for (unsigned c = 0; c < TINGGU_MODEL_CLASS_COUNT; ++c) {
-    output.probabilities[c] /= denominator;
-    if (output.probabilities[c] > output.probabilities[best]) best = c;
-  }
-  output.confidence = output.probabilities[best];
-  output.classification = output.confidence >= TINGGU_MODEL_CONFIDENCE_THRESHOLD
-    ? static_cast<TingguModelClass>(best)
-    : TINGGU_MODEL_UNCERTAIN;
+  return -1;
+}
+inline TingguModelOutput inferTingguModel(const double features[TINGGU_MODEL_FEATURE_COUNT]) {
+  TingguModelOutput output=emptyTingguModelOutput();
+  int at=tingguTreeLeaf(features);if(at<0)return output;
+  const TingguTreeNode &leaf=TINGGU_TREE_NODES[at];
+  unsigned total=leaf.counts[0]+leaf.counts[1]+leaf.counts[2];if(!total)return output;
+  for(unsigned c=0;c<3;++c)output.probabilities[c]=double(leaf.counts[c])/total;
+  output.confidence=output.probabilities[leaf.prediction];
+  output.classification=output.confidence>=TINGGU_MODEL_CONFIDENCE_THRESHOLD?
+    static_cast<TingguModelClass>(leaf.prediction):TINGGU_MODEL_UNCERTAIN;
   return output;
 }
 

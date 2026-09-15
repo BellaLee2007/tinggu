@@ -2,7 +2,15 @@
 
 基于主动敲击与边缘 TinyML 的结构松动智能检测仪。
 
-## OLED 发布版（2026-09-14）
+## 当前正式程序：14维决策树 + OLED（2026-09-15）
+
+使用 [Arduino完整程序与接线说明](firmware/tinggu_edge_runtime/README.md)。下载整个仓库后，用 Arduino IDE 打开 `firmware/tinggu_edge_runtime/tinggu_edge_runtime.ino`，保持同目录头文件完整。目标为 ESP32-S3，依赖 U8g2；压电 GPIO4，MPU SDA17/SCL15，OLED SDA8/SCL9，接线保持不变。
+
+新模型 `waveform_tree14_20260913_verified_20260915` 使用原始生产脚本的完整波形14维特征及 double 决策树。289条波形 Python/C++ 分类一致，209条连续记录通过固件采样适配器对照，ESP32-S3编译通过。94.46%是训练数据回放结果，不能当作独立测试准确率；尚未进行实物验证。上电应看到 `#MODEL_SELFTEST,PASS`，再发送 `ARM_MEASUREMENT`。
+
+[模型接入和验证说明](docs/model_integration_20260915.md) · [验证记录](models/20260913/firmware_verification_20260915/verification.json)
+
+## 历史 OLED 发布版（2026-09-14）
 
 [SSD1306 OLED完整程序与接线README](firmware/releases/oled_ssd1306_20260914/README.md)：包含ESP32-S3独立验屏程序和三次有效敲击测量程序。OLED接3V3/GND、SDA=GPIO8、SCL=GPIO9；使用U8g2库。已通过编译，现场验屏步骤见发布说明。本发布版仍使用原正式LDA模型。
 
@@ -72,7 +80,7 @@ OLED 显示结果
 tinggu/
 ├── firmware/
 │   ├── tinggu_signal_validator/ # 单敲验证与PC采集固件
-│   └── tinggu_edge_runtime/     # 双核采集、40特征LDA与三敲推理
+│   └── tinggu_edge_runtime/     # 双核采集、14维决策树与三敲推理
 ├── python/
 │   ├── collect.py    # 串口采集与原始数据保存
 │   ├── analyze.py    # 波形、频谱和特征分析

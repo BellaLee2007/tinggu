@@ -1,33 +1,35 @@
-# Tinggu edge runtime
+# 听固：新14维决策树 + OLED（2026-09-15）
 
-这是比赛端侧固件骨架，不替代已经验证可用的 `tinggu_signal_validator`。
+本目录是完整ESP32-S3 Arduino测量程序。已接入`decision_tree_full.json`，模型标识`waveform_tree14_20260913_verified_20260915`。正确特征脚本为GitHub提交4859fa6的`models/20260913/train_waveform_14features.py`。
 
-## 当前已实现
+## 上传与接线
 
-- 底层 `adc_continuous` DMA保留每个压电ADC原始点；
-- MPU-6050原始I2C驱动；
-- 采集任务固定到Core 0，分析任务固定到Core 1；
-- 两个固定事件缓冲区和FreeRTOS Queue所有权传递；
-- 三次外部敲击组成一次测量；
-- 质量门控、512点Hann FFT、`f1/tau/Eratio/C`；
-- 240 ms固定截窗、40项频谱/时频/相干特征和三分类LDA模型；
-- 三次敲击分别推理，再平均三类概率输出最终结果；
-- 模型和OLED的独立替换接口；
-- 撞针完全外部触发，没有撞针控制GPIO。
+Arduino选择 **ESP32S3 Dev Module**，安装 **U8g2**（已验证2.36.19，ESP32板包3.3.7）。打开本目录同名ino并保留配套头文件；不要混用旧OLED包内的模型文件。
 
-## 当前硬件接口
+| 模块 | 接线 |
+|---|---|
+| 压电前端输出 | GPIO4 |
+| MPU | VCC=3V3、GND=GND、SDA=17、SCL=15 |
+| SSD1306 128×64 I²C OLED | VCC=3V3、GND=GND、SDA=8、SCL=9 |
+| 电磁撞针 | 独立电源及控制器，不接ESP32功率回路 |
 
-1. 当前ESP32-S3接口为 `PIEZO_ADC_PIN=4`（ADC1_CH3）、`MPU_SDA_PIN=17`、`MPU_SCL_PIN=15`；完整模拟前端见 `docs/tonight_bringup_wiring.md`。
-2. 上电标定的一秒内保持铁板静止。
-3. 串口发送 `ARM_MEASUREMENT`。每一敲先输出 `PREPARE_STRIKE` 并倒计时2秒，看到 `STRIKE_NOW` 后再按撞针；每一敲单独有5秒等待时间。
-4. 当前模型为 `spectral_lda40_20260903`，类别为 `TIGHT/MEDIUM/LOOSE`；最终置信度低于0.50时输出 `UNCERTAIN`。
-5. `#STRIKE_RESULT`把满足质量门控的敲击标为A级并计入；任一敲无效时仍完成后续两敲，但整组不输出松紧类别。`#HIT_MODEL`输出单敲调试概率，`#MEASUREMENT_RESULT`输出三次A级敲击概率平均后的类别。
-6. 当前模型的同日分组验证准确率约81.8%，仍必须用下一次独立实验验证，不能把它当作最终准确率。
-7. 当前 `display_interface.h` 是空实现；OLED准确型号、地址和引脚冻结后再接库。
+断电改线；以模块丝印为准。OLED自动探测0x3C/0x3D；未接屏时串口测量仍可运行。
 
-## 串口命令
+## 开机与测量
 
-- `ARM_MEASUREMENT`：开始等待三次敲击；
-- `ABORT`：中止本次测量；
-- `RECALIBRATE`：重新静置标定；
-- `STATUS`：输出任务核心、状态、采样率和传感器状态。
+1. 串口460800，检查`#MODEL_SELFTEST,PASS`、`#MODEL_CONTRACT,version=waveform_tree14_20260913_verified_20260915`及MPU找到日志。自检失败禁止开始测量。
+2. 静置完成校准，发送`ARM_MEASUREMENT`并换行。
+3. 每次看到STRIKE NOW再按外部撞针；收满三次有效A档后输出TIGHT/MEDIUM/LOOSE或UNCERTAIN，并显示置信度。无效尝试重试，不计入三次。
+4. `ABORT`取消，`RECALIBRATE`重新静置标定，`STATUS`查看状态。物理ARM按钮仍未启用。
+
+新增`#MODEL_FEATURES,id=...,attempt=...,<14个数值>`用于现场特征核对；已有结果与预览串口格式保留。OLED保持最终结果至下一次测量。
+
+## 实现与限制
+
+采集仍在Core0、计算和显示在Core1。模型只支持2kHz压电采样；事件采用V16式确认触发及1400–2600行变长窗口。特征使用整段波形，100Hz频带分界及2048/4096点补零FFT；模型阈值与输入均为double。详细契约见项目`docs/data_contract.md`。
+
+新模型叶计数由完全匹配训练波形恢复；三次概率平均，最大值低于0.50输出UNCERTAIN。旧`model_parameters.h`仅为历史LDA文件，当前代码不引用它。
+
+289条原始波形的14维特征和分类均通过Python/C++对照，209条无时间缺口记录通过原始计数EventBuffer适配对照。其余带时间缺口记录仅完成CSV提取器对照，端侧DMA溢出仍判无效。
+
+这些是算法与移植验证，不能替代新装置实测；289条训练数据回放94.46%也不是独立测试准确率。第一次上传后请三档各试几组，检查分类、MPU掉点、有效A档计数及OLED显示。

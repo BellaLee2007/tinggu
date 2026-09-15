@@ -4,7 +4,7 @@
  * Core 0:
  *   ADC continuous DMA, piezo trigger/windowing, MPU-6050 sampling.
  * Core 1:
- *   quality gates, 512-point FFT, f1/tau/Eratio/C, model/display/serial.
+ *   quality gates, 14 waveform features (up to 4096-point FFT), tree/OLED/serial.
  *
  * The striker is powered and triggered independently. There is deliberately no
  * striker GPIO in this firmware. A measurement consists of three external hits.
@@ -22,6 +22,8 @@
 #include "soc/soc_caps.h"
 #include "model_interface.h"
 #include "display_interface.h"
+#include "waveform_features.h"
+#include "model_selftest.h"
 
 // ---------------------------------------------------------------------------
 // User-editable hardware and experiment configuration
@@ -41,12 +43,14 @@ const uint32_t I2C_CLOCK_HZ = 400000;
 const uint32_t PIEZO_SAMPLE_RATE_HZ = TINGGU_PIEZO_SAMPLE_RATE_HZ;
 const uint32_t MPU_SAMPLE_RATE_HZ = 1000;
 const uint16_t PRE_TRIGGER_MS = 100;
-const uint16_t POST_TRIGGER_MS = 900;
+const uint16_t POST_TRIGGER_MS = 1200; // V16 max window; finish earlier only after 50 ms quiet.
+const uint16_t MIN_EVENT_SAMPLES = 1400;
+const uint16_t CAPTURE_QUIET_SAMPLES = 100;
 const uint16_t REFRACTORY_MS = 200;
 const uint16_t STRIKE_PREPARE_MS = 2000;
 const uint16_t STRIKE_TIMEOUT_MS = 5000;
 
-const uint16_t MIN_TRIGGER_COUNTS = 80;
+const uint16_t MIN_TRIGGER_COUNTS = 20; // Match waveform training V16 trigger.
 const float TRIGGER_NOISE_MULTIPLIER = 6.0f;
 const float PIEZO_MIN_SNR_DB = 10.0f;
 const float MPU_MIN_SNR_DB = 6.0f;
@@ -63,19 +67,15 @@ const float LOW_BAND_MAX_HZ = 200.0f;
 const float HIGH_BAND_MAX_HZ = 800.0f;
 
 const uint32_t MAX_PIEZO_RATE_HZ = 20000;
-const uint32_t MAX_PIEZO_SAMPLES = PIEZO_SAMPLE_RATE_HZ;
+const uint32_t MAX_PIEZO_SAMPLES = 2600;
 const uint32_t PRE_RING_CAPACITY = PIEZO_SAMPLE_RATE_HZ * PRE_TRIGGER_MS / 1000;
-const uint16_t MAX_MPU_SAMPLES = 1200;
+const uint16_t MAX_MPU_SAMPLES = 1400;
 const uint8_t HITS_PER_MEASUREMENT = 3;
-
-const uint16_t MODEL_CROP_MS = 240;
-const uint16_t MODEL_PIEZO_COUNT = PIEZO_SAMPLE_RATE_HZ * MODEL_CROP_MS / 1000;
-const uint16_t MODEL_MPU_COUNT = MPU_SAMPLE_RATE_HZ * MODEL_CROP_MS / 1000;
 
 const float ACCEL_LSB_PER_G = 2048.0f; // MPU +/-16 g.
 const float GYRO_LSB_PER_DPS = 32.8f;  // MPU +/-1000 dps.
 
-static_assert(PIEZO_SAMPLE_RATE_HZ <= MAX_PIEZO_RATE_HZ, "Increase MAX_PIEZO_RATE_HZ");
+static_assert(PIEZO_SAMPLE_RATE_HZ == 2000, "Waveform tree was trained at exactly 2000 Hz");
 static_assert(FFT_SIZE == 512, "The current FFT workspace is fixed at 512");
 
 // ---------------------------------------------------------------------------
@@ -123,6 +123,7 @@ struct MpuTimedSample {
 struct EventBuffer {
   uint32_t measurementId;
   uint8_t hitNumber;
+  uint16_t attemptNumber;
   uint32_t sampleRateHz;
   uint32_t triggerTimestampUs;
   uint32_t eventStartTimestampUs;
@@ -149,7 +150,7 @@ struct HitAnalysis {
   float energyRatio;
   float signature[SIGNATURE_POINTS];
   bool modelReady;
-  float modelFeatures[TINGGU_MODEL_FEATURE_COUNT];
+  double modelFeatures[TINGGU_MODEL_FEATURE_COUNT];
   TingguModelOutput model;
 };
 
@@ -187,6 +188,7 @@ volatile SystemState systemState = STATE_BOOT;
 volatile uint32_t activeMeasurementId = 0;
 volatile uint8_t capturedHitCount = 0;
 volatile uint8_t processedHitCount = 0;
+volatile uint8_t acceptedHitCount = 0;
 volatile uint32_t strikePrepareStartMs = 0;
 volatile uint32_t strikeWaitStartMs = 0;
 volatile uint8_t preparingStrikeNumber = 0;
@@ -214,15 +216,12 @@ bool mpuAvailable = false;
 float fftReal[FFT_SIZE];
 float fftImag[FFT_SIZE];
 
-// Reused only by the Core 1 processing task; kept global to avoid a large task
-// stack and to make peak RAM use deterministic.
-float modelPiezo[MODEL_PIEZO_COUNT];
-float modelMpuAxes[3][MODEL_MPU_COUNT];
-float modelMpu[MODEL_MPU_COUNT];
-float modelP1k[MODEL_MPU_COUNT];
-float modelPowerPiezo[MODEL_PIEZO_COUNT / 2 + 1];
-float modelPowerMpu[MODEL_MPU_COUNT / 2 + 1];
-float modelLogPower[MODEL_PIEZO_COUNT / 2 + 1];
+// Single processing-task workspace; no large stack allocation.
+TingguWaveform14::Workspace treeWorkspace;
+bool modelSelfTestPassed = false;
+volatile float mpuQuietMean[3] = {0,0,0};
+volatile float mpuQuietNoiseG = 0;
+volatile uint32_t calibrationEpoch = 0;
 
 char commandBuffer[48];
 uint8_t commandLength = 0;
@@ -330,6 +329,7 @@ bool configureMpu() {
   if (!mpuWriteByte(activeMpuAddress, 0x1A, 0x01)) return false;
   if (!mpuWriteByte(activeMpuAddress, 0x1B, 0x10)) return false;
   if (!mpuWriteByte(activeMpuAddress, 0x1C, 0x18)) return false;
+  if (activeMpuWhoAmI==0x70 && !mpuWriteByte(activeMpuAddress,0x1D,0x01))return false;
   return true;
 }
 
@@ -340,6 +340,8 @@ int16_t int16FromBytes(uint8_t highByte, uint8_t lowByte) {
 bool readMpuSample(MpuTimedSample &sample) {
   uint8_t data[14];
   if (!mpuAvailable || !mpuReadBytes(activeMpuAddress, 0x3B, data, sizeof(data))) return false;
+  bool allFF=true;for(unsigned i=0;i<14;++i)allFF &= data[i]==0xFF;
+  if(allFF)return false;
   sample.timestampUs = micros();
   sample.ax = int16FromBytes(data[0], data[1]);
   sample.ay = int16FromBytes(data[2], data[3]);
@@ -352,12 +354,20 @@ bool readMpuSample(MpuTimedSample &sample) {
 
 void mpuTask(void *parameter) {
   (void)parameter;
+  TingguWaveform14::Moments calibrationAxes[3];
+  uint32_t seenEpoch=calibrationEpoch;
   TickType_t lastWake = xTaskGetTickCount();
   const TickType_t period = max((TickType_t)1, pdMS_TO_TICKS(1000UL / MPU_SAMPLE_RATE_HZ));
   for (;;) {
     if (mpuAvailable) {
       MpuTimedSample sample;
       if (readMpuSample(sample)) {
+        if(seenEpoch!=calibrationEpoch){for(auto &axis:calibrationAxes)axis=TingguWaveform14::Moments();seenEpoch=calibrationEpoch;}
+        if(systemState==STATE_CALIBRATING){
+          calibrationAxes[0].add(sample.ax);calibrationAxes[1].add(sample.ay);calibrationAxes[2].add(sample.az);
+          double variance=0;for(unsigned a=0;a<3;++a){mpuQuietMean[a]=calibrationAxes[a].mean;variance+=calibrationAxes[a].stddev()*calibrationAxes[a].stddev();}
+          mpuQuietNoiseG=sqrt(variance)/ACCEL_LSB_PER_G;
+        }
         xSemaphoreTake(mpuMutex, portMAX_DELAY);
         mpuRing[mpuRingWrite] = sample;
         mpuRingWrite = (mpuRingWrite + 1) % MAX_MPU_SAMPLES;
@@ -370,8 +380,8 @@ void mpuTask(void *parameter) {
 }
 
 void copyMpuWindow(EventBuffer &event) {
-  uint32_t windowStart = event.triggerTimestampUs - PRE_TRIGGER_MS * 1000UL;
-  uint32_t windowEnd = event.triggerTimestampUs + POST_TRIGGER_MS * 1000UL;
+  uint32_t windowStart = event.eventStartTimestampUs;
+  uint32_t windowEnd = windowStart + (event.piezoCount - 1) * 500UL;
   event.mpuCount = 0;
   xSemaphoreTake(mpuMutex, portMAX_DELAY);
   uint16_t oldest = (mpuRingWrite + MAX_MPU_SAMPLES - mpuRingCount) % MAX_MPU_SAMPLES;
@@ -383,6 +393,20 @@ void copyMpuWindow(EventBuffer &event) {
     }
   }
   xSemaphoreGive(mpuMutex);
+}
+
+// DMA batches lag wall time; use MPU samples at/before the ADC sample, never a future sample.
+bool mpuQuietAt(uint32_t timestamp) {
+  bool quiet=false;
+  xSemaphoreTake(mpuMutex,portMAX_DELAY);
+  for(unsigned back=0;back<mpuRingCount;++back){
+    const auto &v=mpuRing[(mpuRingWrite+MAX_MPU_SAMPLES-1-back)%MAX_MPU_SAMPLES];
+    int32_t age=(int32_t)(timestamp-v.timestampUs);if(age<0)continue;
+    if(age<=5000){float dx=(v.ax-mpuQuietMean[0])/ACCEL_LSB_PER_G,dy=(v.ay-mpuQuietMean[1])/ACCEL_LSB_PER_G,dz=(v.az-mpuQuietMean[2])/ACCEL_LSB_PER_G;
+      quiet=sqrtf(dx*dx+dy*dy+dz*dz)<max(0.02f,3*mpuQuietNoiseG);}
+    break;
+  }
+  xSemaphoreGive(mpuMutex);return quiet;
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +483,7 @@ void resetCalibration() {
   preRingCount = 0;
   preRingWrite = 0;
   recalibrationRequested = false;
+  ++calibrationEpoch;
   systemState = STATE_CALIBRATING;
 }
 
@@ -471,10 +496,11 @@ void announceStrikePreparation(uint8_t strikeNumber) {
 bool armMeasurement() {
   bool started = false;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  if (systemState == STATE_IDLE || systemState == STATE_RESULT_HOLDING) {
+  if (modelSelfTestPassed && (systemState == STATE_IDLE || systemState == STATE_RESULT_HOLDING)) {
     ++activeMeasurementId;
     capturedHitCount = 0;
     processedHitCount = 0;
+    acceptedHitCount = 0;
     preparingStrikeNumber = 1;
     strikePrepareStartMs = millis();
     strikeWaitStartMs = 0;
@@ -494,12 +520,13 @@ void abortMeasurement() {
   ++activeMeasurementId; // Invalidates any event that was already queued.
   capturedHitCount = 0;
   processedHitCount = 0;
+  acceptedHitCount = 0;
   preparingStrikeNumber = 0;
   systemState = STATE_IDLE;
   xSemaphoreGive(stateMutex);
 }
 
-int beginTriggeredEvent(uint16_t triggerRaw, uint32_t triggerTimestampUs) {
+int beginTriggeredEvent(uint16_t triggerRaw, uint32_t triggerTimestampUs, unsigned confirmSamples) {
   uint8_t bufferIndex;
   if (xQueueReceive(freeBufferQueue, &bufferIndex, 0) != pdTRUE) {
     systemState = STATE_FAULT;
@@ -509,24 +536,25 @@ int beginTriggeredEvent(uint16_t triggerRaw, uint32_t triggerTimestampUs) {
 
   EventBuffer &event = *eventBuffers[bufferIndex];
   event.measurementId = activeMeasurementId;
-  event.hitNumber = capturedHitCount + 1;
+  event.hitNumber = acceptedHitCount + 1;
+  event.attemptNumber = capturedHitCount + 1;
   event.sampleRateHz = PIEZO_SAMPLE_RATE_HZ;
   event.triggerTimestampUs = triggerTimestampUs;
-  event.eventStartTimestampUs = triggerTimestampUs - PRE_TRIGGER_MS * 1000UL;
+  event.eventStartTimestampUs = triggerTimestampUs - (200-confirmSamples)*500UL;
   event.dmaOverflowStartCount = adcPoolOverflowCount;
   event.dmaOverflowCount = 0;
   event.expectedPiezoSamples = PIEZO_SAMPLE_RATE_HZ * (PRE_TRIGGER_MS + POST_TRIGGER_MS) / 1000UL;
   event.piezoCount = 0;
 
-  uint32_t requiredPre = PIEZO_SAMPLE_RATE_HZ * PRE_TRIGGER_MS / 1000UL;
+  uint32_t requiredPre = 199; // Current confirming row is appended below.
   uint32_t availablePre = min(preRingCount, requiredPre);
   uint32_t oldest = (preRingWrite + PRE_RING_CAPACITY - availablePre) % PRE_RING_CAPACITY;
   for (uint32_t i = 0; i < availablePre; ++i) {
     event.piezo[event.piezoCount++] = preTriggerRing[(oldest + i) % PRE_RING_CAPACITY];
   }
   while (event.piezoCount < requiredPre) event.piezo[event.piezoCount++] = (uint16_t)piezoBaseline;
-  event.triggerIndex = event.piezoCount;
   event.piezo[event.piezoCount++] = triggerRaw;
+  event.triggerIndex = 200-confirmSamples;
 
   systemState = STATE_CAPTURING;
   postRuntimeEvent(EVENT_HIT_TRIGGERED, event.hitNumber, bufferIndex);
@@ -542,6 +570,8 @@ void acquisitionTask(void *parameter) {
   double calibrationMean = 0.0;
   double calibrationM2 = 0.0;
   int activeBuffer = -1;
+  unsigned candidateSamples=0,candidateActive=0,candidateSum=0,quietSamples=0;
+  uint32_t candidateTimestamp=0;
 
   for (;;) {
     if (activeBuffer >= 0 && systemState != STATE_CAPTURING) {
@@ -558,9 +588,10 @@ void acquisitionTask(void *parameter) {
       continue;
     }
 
+    uint32_t batchEndUs=micros();
     for (uint32_t offset = 0; offset < bytesRead; offset += SOC_ADC_DIGI_RESULT_BYTES) {
       uint16_t raw = adcRawValue(&dmaData[offset]);
-      uint32_t sampleTimestampUs = micros() -
+      uint32_t sampleTimestampUs = batchEndUs -
         ((bytesRead - offset) / SOC_ADC_DIGI_RESULT_BYTES) * (1000000UL / PIEZO_SAMPLE_RATE_HZ);
 
       if (recalibrationRequested) {
@@ -585,14 +616,21 @@ void acquisitionTask(void *parameter) {
         }
       }
 
+      if(systemState!=STATE_MEASUREMENT_ARMED){candidateSamples=candidateActive=candidateSum=0;}
       if (systemState == STATE_MEASUREMENT_ARMED) {
         if (millis() - strikeWaitStartMs > STRIKE_TIMEOUT_MS) {
           systemState = STATE_RESULT_HOLDING;
-          postRuntimeEvent(EVENT_MEASUREMENT_TIMEOUT, capturedHitCount + 1, 0);
+           postRuntimeEvent(EVENT_MEASUREMENT_TIMEOUT, acceptedHitCount + 1, 0);
         } else if ((int32_t)(millis() - refractoryUntilMs) >= 0) {
           int amplitude = abs((int)raw - (int)lroundf(piezoBaseline));
-          if (amplitude >= piezoTriggerThreshold) {
-            activeBuffer = beginTriggeredEvent(raw, sampleTimestampUs);
+          if(amplitude>=piezoTriggerThreshold || candidateSamples){
+            if(!candidateSamples)candidateTimestamp=sampleTimestampUs;
+            ++candidateSamples;candidateSum+=amplitude;
+            if(amplitude>=ceilf(max(8.0f,3*piezoNoiseRms)))++candidateActive;
+            if(candidateActive>=3 && candidateSum>=3U*piezoTriggerThreshold){
+              activeBuffer=beginTriggeredEvent(raw,candidateTimestamp,candidateSamples);quietSamples=0;
+              candidateSamples=candidateActive=candidateSum=0;
+            }else if(candidateSamples>=10){candidateSamples=candidateActive=candidateSum=0;}
           }
         }
       } else if (systemState == STATE_CAPTURING && activeBuffer >= 0) {
@@ -600,7 +638,11 @@ void acquisitionTask(void *parameter) {
         if (event.piezoCount < event.expectedPiezoSamples && event.piezoCount < MAX_PIEZO_SAMPLES) {
           event.piezo[event.piezoCount++] = raw;
         }
-        if (event.piezoCount >= event.expectedPiezoSamples) {
+        bool piezoQuiet=abs((int)raw-(int)lroundf(piezoBaseline))<ceilf(max(8.0f,3*piezoNoiseRms));
+        bool mpuQuiet=mpuQuietAt(sampleTimestampUs);
+        if(piezoQuiet && (!mpuAvailable || mpuQuiet))++quietSamples;else quietSamples=0;
+        if (event.piezoCount >= event.expectedPiezoSamples ||
+            (event.piezoCount>=MIN_EVENT_SAMPLES && quietSamples>=CAPTURE_QUIET_SAMPLES)) {
           event.dmaOverflowCount += adcPoolOverflowCount - event.dmaOverflowStartCount;
           copyMpuWindow(event);
           uint8_t completedIndex = (uint8_t)activeBuffer;
@@ -665,326 +707,7 @@ void fft512(float *realValues, float *imagValues) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 240 ms spectral model feature extractor (matches advanced_recrop_search.py)
-// ---------------------------------------------------------------------------
-float medianInPlace(float *values, uint16_t count) {
-  if (count == 0) return 0.0f;
-  for (uint16_t i = 1; i < count; ++i) {
-    float value = values[i];
-    int j = (int)i - 1;
-    while (j >= 0 && values[j] > value) {
-      values[j + 1] = values[j];
-      --j;
-    }
-    values[j + 1] = value;
-  }
-  return count & 1 ? values[count / 2]
-                   : 0.5f * (values[count / 2 - 1] + values[count / 2]);
-}
-
-void modelPowerSpectrum(const float *values, uint16_t count, bool periodicHann,
-                        float *power) {
-  float mean = 0.0f;
-  for (uint16_t i = 0; i < count; ++i) mean += values[i];
-  mean /= count;
-  for (uint16_t bin = 0; bin <= count / 2; ++bin) {
-    float step = -2.0f * PI * bin / count;
-    float stepReal = cosf(step), stepImag = sinf(step);
-    float oscillatorReal = 1.0f, oscillatorImag = 0.0f;
-    float sumReal = 0.0f, sumImag = 0.0f;
-    for (uint16_t i = 0; i < count; ++i) {
-      float divisor = periodicHann ? (float)count : (float)(count - 1);
-      float window = 0.5f - 0.5f * cosf(2.0f * PI * i / divisor);
-      float sample = (values[i] - mean) * window;
-      sumReal += sample * oscillatorReal;
-      sumImag += sample * oscillatorImag;
-      float nextReal = oscillatorReal * stepReal - oscillatorImag * stepImag;
-      oscillatorImag = oscillatorReal * stepImag + oscillatorImag * stepReal;
-      oscillatorReal = nextReal;
-    }
-    power[bin] = sumReal * sumReal + sumImag * sumImag;
-  }
-}
-
-float modelBandShare(const float *power, uint16_t count, float sampleRate,
-                     float validMaximumHz, float lowHz, float highHz) {
-  double total = 1e-12, selected = 0.0;
-  for (uint16_t bin = 0; bin <= count / 2; ++bin) {
-    float frequency = bin * sampleRate / count;
-    if (frequency >= 5.0f && frequency <= validMaximumHz) total += power[bin];
-    if (frequency >= lowHz && frequency < highHz) selected += power[bin];
-  }
-  return (float)(selected / total);
-}
-
-float modelCepstralCoefficient(const float *power, uint16_t count,
-                               float sampleRate, float validMaximumHz,
-                               uint8_t coefficient) {
-  double total = 1e-12;
-  uint16_t validCount = 0;
-  for (uint16_t bin = 0; bin <= count / 2; ++bin) {
-    float frequency = bin * sampleRate / count;
-    if (frequency >= 5.0f && frequency <= validMaximumHz) {
-      total += power[bin];
-      ++validCount;
-    }
-  }
-  uint16_t index = 0;
-  for (uint16_t bin = 0; bin <= count / 2; ++bin) {
-    float frequency = bin * sampleRate / count;
-    if (frequency >= 5.0f && frequency <= validMaximumHz) {
-      modelLogPower[index++] = log1pf((float)(power[bin] / total) * 10000.0f);
-    }
-  }
-  if (validCount == 0) return 0.0f;
-  double sum = 0.0;
-  for (uint16_t i = 0; i < validCount; ++i) {
-    sum += modelLogPower[i] * cos(PI * coefficient * (2.0 * i + 1.0) / (2.0 * validCount));
-  }
-  return (float)(sum * (coefficient == 0 ? sqrt(1.0 / validCount)
-                                         : sqrt(2.0 / validCount)));
-}
-
-void modelStftShares(const float *values, uint16_t count, float sampleRate,
-                     uint16_t segmentLength, const float bands[][2],
-                     uint8_t bandCount, float shares[4][7]) {
-  memset(shares, 0, sizeof(float) * 4 * 7);
-  double denominators[4] = {1e-12, 1e-12, 1e-12, 1e-12};
-  double numerators[4][7] = {};
-  float mean = 0.0f;
-  for (uint16_t i = 0; i < count; ++i) mean += values[i];
-  mean /= count;
-  uint16_t hop = segmentLength / 2;
-  uint16_t frames = (count <= segmentLength) ? 1 :
-    (uint16_t)((count - segmentLength + hop - 1) / hop + 1);
-  for (uint16_t frame = 0; frame < frames; ++frame) {
-    float centerSeconds = (frame * hop + segmentLength / 2) / sampleRate;
-    uint8_t group = centerSeconds < 0.04f ? 0 :
-                    centerSeconds < 0.08f ? 1 :
-                    centerSeconds < 0.14f ? 2 : 3;
-    for (uint16_t bin = 0; bin <= segmentLength / 2; ++bin) {
-      float step = -2.0f * PI * bin / segmentLength;
-      float stepReal = cosf(step), stepImag = sinf(step);
-      float oscillatorReal = 1.0f, oscillatorImag = 0.0f;
-      float sumReal = 0.0f, sumImag = 0.0f;
-      for (uint16_t i = 0; i < segmentLength; ++i) {
-        uint16_t source = frame * hop + i;
-        float sample = source < count ? values[source] - mean : 0.0f;
-        float window = 0.5f - 0.5f * cosf(2.0f * PI * i / segmentLength);
-        sumReal += sample * window * oscillatorReal;
-        sumImag += sample * window * oscillatorImag;
-        float nextReal = oscillatorReal * stepReal - oscillatorImag * stepImag;
-        oscillatorImag = oscillatorReal * stepImag + oscillatorImag * stepReal;
-        oscillatorReal = nextReal;
-      }
-      double power = sumReal * sumReal + sumImag * sumImag;
-      float frequency = bin * sampleRate / segmentLength;
-      denominators[group] += power;
-      for (uint8_t band = 0; band < bandCount; ++band) {
-        if (frequency >= bands[band][0] && frequency < bands[band][1]) {
-          numerators[group][band] += power;
-        }
-      }
-    }
-  }
-  for (uint8_t group = 0; group < 4; ++group) {
-    for (uint8_t band = 0; band < bandCount; ++band) {
-      shares[group][band] = (float)(numerators[group][band] / denominators[group]);
-    }
-  }
-}
-
-float modelMpuAxisValue(const MpuTimedSample &sample, uint8_t axis) {
-  if (axis == 0) return sample.ax / ACCEL_LSB_PER_G;
-  if (axis == 1) return sample.ay / ACCEL_LSB_PER_G;
-  return sample.az / ACCEL_LSB_PER_G;
-}
-
-bool resampleModelMpu(const EventBuffer &event) {
-  if (event.mpuCount < 4) return false;
-  float preValues[3][128];
-  uint16_t preCount = 0;
-  for (uint16_t i = 0; i < event.mpuCount && preCount < 128; ++i) {
-    int32_t relativeUs = (int32_t)(event.mpu[i].timestampUs - event.triggerTimestampUs);
-    if (relativeUs >= -90000 && relativeUs <= -10000) {
-      for (uint8_t axis = 0; axis < 3; ++axis) preValues[axis][preCount] = modelMpuAxisValue(event.mpu[i], axis);
-      ++preCount;
-    }
-  }
-  if (preCount < 2) return false;
-  float center[3];
-  for (uint8_t axis = 0; axis < 3; ++axis) center[axis] = medianInPlace(preValues[axis], preCount);
-
-  uint16_t cursor = 0;
-  for (uint16_t targetIndex = 0; targetIndex < MODEL_MPU_COUNT; ++targetIndex) {
-    int32_t targetUs = (int32_t)targetIndex * 1000;
-    while (cursor + 1 < event.mpuCount &&
-           (int32_t)(event.mpu[cursor + 1].timestampUs - event.triggerTimestampUs) < targetUs) {
-      ++cursor;
-    }
-    uint16_t left = cursor;
-    uint16_t right = min((uint16_t)(cursor + 1), (uint16_t)(event.mpuCount - 1));
-    int32_t leftUs = (int32_t)(event.mpu[left].timestampUs - event.triggerTimestampUs);
-    int32_t rightUs = (int32_t)(event.mpu[right].timestampUs - event.triggerTimestampUs);
-    float fraction = rightUs != leftUs ? constrain((targetUs - leftUs) / (float)(rightUs - leftUs), 0.0f, 1.0f) : 0.0f;
-    for (uint8_t axis = 0; axis < 3; ++axis) {
-      float leftValue = modelMpuAxisValue(event.mpu[left], axis);
-      float rightValue = modelMpuAxisValue(event.mpu[right], axis);
-      modelMpuAxes[axis][targetIndex] = leftValue + fraction * (rightValue - leftValue) - center[axis];
-    }
-  }
-
-  float means[3] = {};
-  for (uint8_t axis = 0; axis < 3; ++axis) {
-    for (uint16_t i = 0; i < MODEL_MPU_COUNT; ++i) means[axis] += modelMpuAxes[axis][i];
-    means[axis] /= MODEL_MPU_COUNT;
-  }
-  float covariance[3][3] = {};
-  for (uint8_t row = 0; row < 3; ++row) {
-    for (uint8_t column = 0; column < 3; ++column) {
-      double sum = 0.0;
-      for (uint16_t i = 0; i < MODEL_MPU_COUNT; ++i) {
-        sum += (modelMpuAxes[row][i] - means[row]) * (modelMpuAxes[column][i] - means[column]);
-      }
-      covariance[row][column] = (float)(sum / (MODEL_MPU_COUNT - 1));
-    }
-  }
-  uint8_t largestVarianceAxis = 0;
-  if (covariance[1][1] > covariance[largestVarianceAxis][largestVarianceAxis]) largestVarianceAxis = 1;
-  if (covariance[2][2] > covariance[largestVarianceAxis][largestVarianceAxis]) largestVarianceAxis = 2;
-  float eigenvector[3] = {0.0f, 0.0f, 0.0f};
-  eigenvector[largestVarianceAxis] = 1.0f;
-  for (uint8_t iteration = 0; iteration < 16; ++iteration) {
-    float next[3] = {};
-    for (uint8_t row = 0; row < 3; ++row) {
-      for (uint8_t column = 0; column < 3; ++column) next[row] += covariance[row][column] * eigenvector[column];
-    }
-    float norm = sqrtf(next[0] * next[0] + next[1] * next[1] + next[2] * next[2]);
-    if (norm < 1e-12f) return false;
-    for (uint8_t axis = 0; axis < 3; ++axis) eigenvector[axis] = next[axis] / norm;
-  }
-  for (uint16_t i = 0; i < MODEL_MPU_COUNT; ++i) {
-    modelMpu[i] = modelMpuAxes[0][i] * eigenvector[0] +
-                  modelMpuAxes[1][i] * eigenvector[1] +
-                  modelMpuAxes[2][i] * eigenvector[2];
-  }
-  return true;
-}
-
-float modelLogRatioBand(const float *piezoPower, const float *mpuPower,
-                        float lowHz, float highHz) {
-  uint16_t count = 0;
-  for (uint16_t bin = 0; bin <= MODEL_MPU_COUNT / 2; ++bin) {
-    float frequency = bin * MPU_SAMPLE_RATE_HZ / (float)MODEL_MPU_COUNT;
-    if (frequency >= lowHz && frequency < highHz) {
-      modelLogPower[count++] = logf((sqrtf(mpuPower[bin]) + 1e-9f) /
-                                    (sqrtf(piezoPower[bin]) + 1e-9f));
-    }
-  }
-  return medianInPlace(modelLogPower, count);
-}
-
-float modelCoherence30To60(const float *piezo, const float *mpu) {
-  const uint16_t segmentLength = 96, hop = 48, segments = 4;
-  float coherenceSum = 0.0f;
-  uint8_t binCount = 0;
-  for (uint16_t bin = 0; bin <= segmentLength / 2; ++bin) {
-    float frequency = bin * MPU_SAMPLE_RATE_HZ / (float)segmentLength;
-    if (frequency < 30.0f || frequency >= 60.0f) continue;
-    double crossReal = 0.0, crossImag = 0.0, piezoAuto = 0.0, mpuAuto = 0.0;
-    for (uint16_t segment = 0; segment < segments; ++segment) {
-      uint16_t start = segment * hop;
-      float piezoMean = 0.0f, mpuMean = 0.0f;
-      for (uint16_t i = 0; i < segmentLength; ++i) {
-        piezoMean += piezo[start + i];
-        mpuMean += mpu[start + i];
-      }
-      piezoMean /= segmentLength;
-      mpuMean /= segmentLength;
-      float step = -2.0f * PI * bin / segmentLength;
-      float stepReal = cosf(step), stepImag = sinf(step);
-      float oscillatorReal = 1.0f, oscillatorImag = 0.0f;
-      float pr = 0.0f, pi = 0.0f, mr = 0.0f, mi = 0.0f;
-      for (uint16_t i = 0; i < segmentLength; ++i) {
-        float window = 0.5f - 0.5f * cosf(2.0f * PI * i / segmentLength);
-        float pv = (piezo[start + i] - piezoMean) * window;
-        float mv = (mpu[start + i] - mpuMean) * window;
-        pr += pv * oscillatorReal; pi += pv * oscillatorImag;
-        mr += mv * oscillatorReal; mi += mv * oscillatorImag;
-        float nextReal = oscillatorReal * stepReal - oscillatorImag * stepImag;
-        oscillatorImag = oscillatorReal * stepImag + oscillatorImag * stepReal;
-        oscillatorReal = nextReal;
-      }
-      crossReal += pr * mr + pi * mi;
-      crossImag += pi * mr - pr * mi;
-      piezoAuto += pr * pr + pi * pi;
-      mpuAuto += mr * mr + mi * mi;
-    }
-    double denominator = piezoAuto * mpuAuto;
-    coherenceSum += denominator > 1e-24 ? (float)((crossReal * crossReal + crossImag * crossImag) / denominator) : 0.0f;
-    ++binCount;
-  }
-  return binCount > 0 ? coherenceSum / binCount : 0.0f;
-}
-
-bool extractSpectralModelFeatures(const EventBuffer &event,
-                                  float features[TINGGU_MODEL_FEATURE_COUNT]) {
-  if (event.piezoCount < event.triggerIndex + MODEL_PIEZO_COUNT || !resampleModelMpu(event)) return false;
-  memset(features, 0, sizeof(float) * TINGGU_MODEL_FEATURE_COUNT);
-
-  uint16_t baselineCount = 0;
-  int32_t baselineStart = (int32_t)event.triggerIndex - (int32_t)(event.sampleRateHz * 90 / 1000);
-  int32_t baselineEnd = (int32_t)event.triggerIndex - (int32_t)(event.sampleRateHz * 10 / 1000);
-  for (int32_t i = max((int32_t)0, baselineStart); i <= baselineEnd && i < (int32_t)event.piezoCount; ++i) {
-    modelLogPower[baselineCount++] = event.piezo[i];
-  }
-  float baseline = medianInPlace(modelLogPower, baselineCount);
-  for (uint16_t i = 0; i < MODEL_PIEZO_COUNT; ++i) modelPiezo[i] = event.piezo[event.triggerIndex + i] - baseline;
-
-  modelPowerSpectrum(modelMpu, MODEL_MPU_COUNT, false, modelPowerMpu);
-  features[0] = modelBandShare(modelPowerMpu, MODEL_MPU_COUNT, MPU_SAMPLE_RATE_HZ, 400.0f, 150.0f, 200.0f);
-  features[1] = modelBandShare(modelPowerMpu, MODEL_MPU_COUNT, MPU_SAMPLE_RATE_HZ, 400.0f, 200.0f, 250.0f);
-  features[2] = modelBandShare(modelPowerMpu, MODEL_MPU_COUNT, MPU_SAMPLE_RATE_HZ, 400.0f, 250.0f, 400.0f);
-  features[3] = modelBandShare(modelPowerMpu, MODEL_MPU_COUNT, MPU_SAMPLE_RATE_HZ, 400.0f, 60.0f, 100.0f);
-  const uint8_t mpuCepIndices[6] = {3, 6, 8, 9, 15, 16};
-  for (uint8_t i = 0; i < 6; ++i) features[4 + i] = modelCepstralCoefficient(
-    modelPowerMpu, MODEL_MPU_COUNT, MPU_SAMPLE_RATE_HZ, 400.0f, mpuCepIndices[i]);
-
-  const float mpuBands[7][2] = {{5,30},{30,60},{60,100},{100,150},{150,200},{200,250},{250,400}};
-  float mpuStft[4][7];
-  modelStftShares(modelMpu, MODEL_MPU_COUNT, MPU_SAMPLE_RATE_HZ, 64, mpuBands, 7, mpuStft);
-  features[10] = mpuStft[0][3]; features[11] = mpuStft[0][4];
-  features[12] = mpuStft[0][5]; features[13] = mpuStft[0][0]; features[14] = mpuStft[0][2];
-  features[15] = mpuStft[1][4]; features[16] = mpuStft[1][6]; features[17] = mpuStft[1][2];
-  features[18] = mpuStft[2][4];
-
-  modelPowerSpectrum(modelPiezo, MODEL_PIEZO_COUNT, false, modelPowerPiezo);
-  features[19] = modelBandShare(modelPowerPiezo, MODEL_PIEZO_COUNT, PIEZO_SAMPLE_RATE_HZ, 800.0f, 100.0f, 150.0f);
-  features[20] = modelBandShare(modelPowerPiezo, MODEL_PIEZO_COUNT, PIEZO_SAMPLE_RATE_HZ, 800.0f, 150.0f, 200.0f);
-  features[21] = modelBandShare(modelPowerPiezo, MODEL_PIEZO_COUNT, PIEZO_SAMPLE_RATE_HZ, 800.0f, 300.0f, 500.0f);
-  const uint8_t piezoCepIndices[6] = {2, 3, 5, 7, 9, 19};
-  for (uint8_t i = 0; i < 6; ++i) features[22 + i] = modelCepstralCoefficient(
-    modelPowerPiezo, MODEL_PIEZO_COUNT, PIEZO_SAMPLE_RATE_HZ, 800.0f, piezoCepIndices[i]);
-
-  const float piezoBands[7][2] = {{5,30},{30,60},{60,100},{100,150},{150,250},{250,500},{500,800}};
-  float piezoStft[4][7];
-  modelStftShares(modelPiezo, MODEL_PIEZO_COUNT, PIEZO_SAMPLE_RATE_HZ, 128, piezoBands, 7, piezoStft);
-  features[28] = piezoStft[1][3]; features[29] = piezoStft[1][5];
-  features[30] = piezoStft[2][3]; features[31] = piezoStft[2][0];
-  features[32] = piezoStft[3][3]; features[33] = piezoStft[3][4];
-  features[34] = piezoStft[3][0]; features[35] = piezoStft[3][2];
-
-  for (uint16_t i = 0; i < MODEL_MPU_COUNT; ++i) modelP1k[i] = modelPiezo[i * 2];
-  modelPowerSpectrum(modelP1k, MODEL_MPU_COUNT, false, modelPowerPiezo);
-  modelPowerSpectrum(modelMpu, MODEL_MPU_COUNT, false, modelPowerMpu);
-  features[36] = modelCoherence30To60(modelP1k, modelMpu);
-  features[37] = modelLogRatioBand(modelPowerPiezo, modelPowerMpu, 100.0f, 150.0f);
-  features[38] = modelLogRatioBand(modelPowerPiezo, modelPowerMpu, 150.0f, 200.0f);
-  features[39] = modelLogRatioBand(modelPowerPiezo, modelPowerMpu, 60.0f, 100.0f);
-  for (uint8_t i = 0; i < TINGGU_MODEL_FEATURE_COUNT; ++i) if (!isfinite(features[i])) return false;
-  return true;
-}
+#include "tree_event_adapter.h"
 
 float estimateTauMs(const EventBuffer &event, float baseline, float noiseRms) {
   const uint32_t blockSamples = max(1UL, event.sampleRateHz / 200UL); // 5 ms RMS blocks.
@@ -1126,11 +849,11 @@ HitAnalysis analyzeHit(const EventBuffer &event) {
   float mpuNoisePower = mpuPreCount > 0 ? prePower[dominantAxis] / mpuPreCount : 1e12f;
   float mpuEventPower = postCount > 0 ? postPower[dominantAxis] / postCount : 0.0f;
   result.mpuSnrDb = finiteSnr(mpuEventPower, mpuNoisePower);
-  uint32_t expectedMpu = MPU_SAMPLE_RATE_HZ * (PRE_TRIGGER_MS + POST_TRIGGER_MS) / 1000UL;
+  uint32_t expectedMpu = event.piezoCount / 2;
   result.dropRate = expectedMpu > 0 ? max(0.0f, 1.0f - event.mpuCount / (float)expectedMpu) : 1.0f;
   if (event.dmaOverflowCount > 0) result.dropRate = 1.0f;
 
-  result.modelReady = extractSpectralModelFeatures(event, result.modelFeatures);
+  result.modelReady = modelSelfTestPassed && extractWaveformModelFeatures(event, treeWorkspace, result.modelFeatures);
   if (result.modelReady) result.model = inferTingguModel(result.modelFeatures);
   result.qualityValid = !result.piezoSaturated && !result.mpuSaturated &&
     result.piezoSnrDb >= PIEZO_MIN_SNR_DB && result.mpuSnrDb >= MPU_MIN_SNR_DB &&
@@ -1146,7 +869,7 @@ float signatureCorrelation(const float *a, const float *b) {
 }
 
 void finishMeasurementIfReady() {
-  if (processedHitCount < HITS_PER_MEASUREMENT) return;
+  if (acceptedHitCount < HITS_PER_MEASUREMENT) return;
   latestResult.measurementId = activeMeasurementId;
   for (uint8_t i = 0; i < HITS_PER_MEASUREMENT; ++i) latestResult.hits[i] = hitResults[i];
   float c01 = signatureCorrelation(hitResults[0].signature, hitResults[1].signature);
@@ -1158,7 +881,10 @@ void finishMeasurementIfReady() {
   latestResult.features[1] = medianOfThree(hitResults[0].tauMs, hitResults[1].tauMs, hitResults[2].tauMs);
   latestResult.features[2] = medianOfThree(hitResults[0].energyRatio, hitResults[1].energyRatio, hitResults[2].energyRatio);
   latestResult.features[3] = consistency;
-  latestResult.valid = consistency >= MIN_CONSISTENCY;
+  // Three accepted A-grade strikes are sufficient for inference. Consistency
+  // remains a diagnostic feature, but it must not discard a group that has
+  // already passed all three per-strike quality gates.
+  latestResult.valid = true;
   for (uint8_t i = 0; i < HITS_PER_MEASUREMENT; ++i) latestResult.valid &= hitResults[i].qualityValid;
   TingguModelOutput perHitModels[HITS_PER_MEASUREMENT];
   for (uint8_t i = 0; i < HITS_PER_MEASUREMENT; ++i) perHitModels[i] = hitResults[i].model;
@@ -1185,6 +911,66 @@ void beginNextStrikePreparation(uint8_t strikeNumber) {
   announceStrikePreparation(strikeNumber);
 }
 
+void emitHitPreview(const EventBuffer &event) {
+  // The edge runtime keeps the full-rate samples for feature extraction, but the
+  // desktop UI only needs a compact visual preview.  Sending 101 decimated
+  // points avoids the multi-second serial transfer used by the validator.
+  const uint16_t previewPoints = 101;
+  if (event.piezoCount < 2 || event.sampleRateHz == 0) return;
+
+  uint32_t piezoBaselineCount = event.triggerIndex;
+  if (piezoBaselineCount == 0 || piezoBaselineCount > event.piezoCount)
+    piezoBaselineCount = event.piezoCount < 64 ? event.piezoCount : 64;
+  double piezoBaselineSum = 0.0;
+  for (uint32_t i = 0; i < piezoBaselineCount; ++i) piezoBaselineSum += event.piezo[i];
+  float previewPiezoBaseline = (float)(piezoBaselineSum / piezoBaselineCount);
+
+  double meanAx = 0.0, meanAy = 0.0, meanAz = 0.0;
+  uint16_t mpuBaselineCount = 0;
+  for (uint16_t i = 0; i < event.mpuCount; ++i) {
+    if ((int32_t)(event.mpu[i].timestampUs - event.triggerTimestampUs) >= 0) break;
+    meanAx += event.mpu[i].ax;
+    meanAy += event.mpu[i].ay;
+    meanAz += event.mpu[i].az;
+    ++mpuBaselineCount;
+  }
+  if (mpuBaselineCount == 0 && event.mpuCount > 0) {
+    meanAx = event.mpu[0].ax;
+    meanAy = event.mpu[0].ay;
+    meanAz = event.mpu[0].az;
+    mpuBaselineCount = 1;
+  }
+  if (mpuBaselineCount > 0) {
+    meanAx /= mpuBaselineCount;
+    meanAy /= mpuBaselineCount;
+    meanAz /= mpuBaselineCount;
+  }
+
+  serialPrintf("#PREVIEW_BEGIN,measurement_id=%lu,strike_index=%u,count=%u\n",
+    (unsigned long)event.measurementId, event.hitNumber, previewPoints);
+  uint16_t mpuCursor = 0;
+  for (uint16_t point = 0; point < previewPoints; ++point) {
+    uint32_t piezoIndex = (uint32_t)point * (event.piezoCount - 1) / (previewPoints - 1);
+    float timeMs = ((int32_t)piezoIndex - (int32_t)event.triggerIndex) *
+      1000.0f / event.sampleRateHz;
+    int64_t targetTimestampUs = (int64_t)event.triggerTimestampUs + (int64_t)(timeMs * 1000.0f);
+    while (mpuCursor + 1 < event.mpuCount &&
+           (int64_t)event.mpu[mpuCursor + 1].timestampUs <= targetTimestampUs)
+      ++mpuCursor;
+    float mpuDynamicG = 0.0f;
+    if (event.mpuCount > 0 && mpuBaselineCount > 0) {
+      float dx = (event.mpu[mpuCursor].ax - meanAx) / ACCEL_LSB_PER_G;
+      float dy = (event.mpu[mpuCursor].ay - meanAy) / ACCEL_LSB_PER_G;
+      float dz = (event.mpu[mpuCursor].az - meanAz) / ACCEL_LSB_PER_G;
+      mpuDynamicG = sqrtf(dx * dx + dy * dy + dz * dz);
+    }
+    serialPrintf("#PREVIEW_POINT,index=%u,time_ms=%.3f,piezo_delta=%.3f,mpu_dynamic_g=%.6f\n",
+      point, timeMs, event.piezo[piezoIndex] - previewPiezoBaseline, mpuDynamicG);
+  }
+  serialPrintf("#PREVIEW_END,measurement_id=%lu,strike_index=%u\n",
+    (unsigned long)event.measurementId, event.hitNumber);
+}
+
 void processingTask(void *parameter) {
   (void)parameter;
   for (;;) {
@@ -1195,38 +981,54 @@ void processingTask(void *parameter) {
       xQueueSend(freeBufferQueue, &bufferIndex, portMAX_DELAY);
       continue;
     }
-    if (event.hitNumber == HITS_PER_MEASUREMENT) {
-      serialPrintf("#PROMPT,MODEL_ANALYZING,measurement_id=%lu\n",
-        (unsigned long)event.measurementId);
-      tingguDisplayState("MODEL_ANALYZING");
-    }
+    uint32_t eventMeasurementId = event.measurementId;
     HitAnalysis analysis = analyzeHit(event);
+    if(analysis.modelReady){
+      char featureLine[768];int used=snprintf(featureLine,sizeof(featureLine),"#MODEL_FEATURES,id=%lu,attempt=%u",(unsigned long)eventMeasurementId,event.attemptNumber);
+      for(unsigned f=0;f<14 && used<(int)sizeof(featureLine)-40;++f)used+=snprintf(featureLine+used,sizeof(featureLine)-used,",%.12g",analysis.modelFeatures[f]);
+      serialPrintf("%s\n",featureLine);
+    }
+    emitHitPreview(event);
+    xSemaphoreTake(stateMutex,portMAX_DELAY);
+    if(eventMeasurementId!=activeMeasurementId){xSemaphoreGive(stateMutex);xQueueSend(freeBufferQueue,&bufferIndex,portMAX_DELAY);continue;}
     uint8_t resultIndex = event.hitNumber > 0 ? event.hitNumber - 1 : 0;
-    if (resultIndex < HITS_PER_MEASUREMENT) hitResults[resultIndex] = analysis;
     ++processedHitCount;
-    serialPrintf("#HIT_FEATURES,measurement_id=%lu,strike_index=%u,valid=%d,piezo_snr_db=%.3f,mpu_snr_db=%.3f,drop_rate=%.6f,f1_hz=%.4f,tau_ms=%.4f,e_ratio=%.6f\n",
-      (unsigned long)event.measurementId, event.hitNumber, analysis.qualityValid ? 1 : 0,
+    if (analysis.qualityValid && resultIndex < HITS_PER_MEASUREMENT) {
+      hitResults[resultIndex] = analysis;
+      ++acceptedHitCount;
+    }
+    serialPrintf("#HIT_FEATURES,measurement_id=%lu,strike_index=%u,attempt_index=%u,valid=%d,piezo_snr_db=%.3f,mpu_snr_db=%.3f,drop_rate=%.6f,f1_hz=%.4f,tau_ms=%.4f,e_ratio=%.6f\n",
+      (unsigned long)event.measurementId, event.hitNumber, event.attemptNumber,
+      analysis.qualityValid ? 1 : 0,
       analysis.piezoSnrDb, analysis.mpuSnrDb, analysis.dropRate,
       analysis.f1Hz, analysis.tauMs, analysis.energyRatio);
-    serialPrintf("#STRIKE_RESULT,measurement_id=%lu,strike_index=%u,grade=%s,counted=%d,piezo_saturated=%d,mpu_saturated=%d,piezo_snr_ok=%d,mpu_snr_ok=%d,drop_rate_ok=%d,model_ready=%d\n",
-      (unsigned long)event.measurementId, event.hitNumber,
+    serialPrintf("#STRIKE_RESULT,measurement_id=%lu,strike_index=%u,attempt_index=%u,accepted_count=%u,required_count=%u,grade=%s,counted=%d,piezo_saturated=%d,mpu_saturated=%d,piezo_snr_ok=%d,mpu_snr_ok=%d,drop_rate_ok=%d,model_ready=%d\n",
+      (unsigned long)event.measurementId, event.hitNumber, event.attemptNumber,
+      acceptedHitCount, HITS_PER_MEASUREMENT,
       analysis.qualityValid ? "A" : "INVALID", analysis.qualityValid ? 1 : 0,
       analysis.piezoSaturated ? 1 : 0, analysis.mpuSaturated ? 1 : 0,
       analysis.piezoSnrDb >= PIEZO_MIN_SNR_DB ? 1 : 0,
       analysis.mpuSnrDb >= MPU_MIN_SNR_DB ? 1 : 0,
       analysis.dropRate < MAX_DROP_RATE ? 1 : 0, analysis.modelReady ? 1 : 0);
-    serialPrintf("#HIT_MODEL,measurement_id=%lu,strike_index=%u,ready=%d,counted=%d,class=%s,confidence=%.4f,p_tight=%.5f,p_medium=%.5f,p_loose=%.5f\n",
-      (unsigned long)event.measurementId, event.hitNumber, analysis.modelReady ? 1 : 0,
+    serialPrintf("#HIT_MODEL,measurement_id=%lu,strike_index=%u,attempt_index=%u,accepted_count=%u,ready=%d,counted=%d,class=%s,confidence=%.4f,p_tight=%.5f,p_medium=%.5f,p_loose=%.5f\n",
+      (unsigned long)event.measurementId, event.hitNumber, event.attemptNumber,
+      acceptedHitCount, analysis.modelReady ? 1 : 0,
       analysis.qualityValid ? 1 : 0,
       analysis.qualityValid ? tingguClassName(analysis.model.classification) : "NOT_COUNTED",
       analysis.model.confidence,
       analysis.model.probabilities[0], analysis.model.probabilities[1], analysis.model.probabilities[2]);
     xQueueSend(freeBufferQueue, &bufferIndex, portMAX_DELAY);
-    if (event.hitNumber < HITS_PER_MEASUREMENT) {
-      beginNextStrikePreparation(event.hitNumber + 1);
+    if (acceptedHitCount < HITS_PER_MEASUREMENT) {
+      // Invalid attempts are discarded and the same accepted-strike slot is
+      // retried. A valid attempt advances to the next slot.
+      beginNextStrikePreparation(acceptedHitCount + 1);
     } else {
+      serialPrintf("#PROMPT,MODEL_ANALYZING,measurement_id=%lu\n",
+        (unsigned long)eventMeasurementId);
+      tingguDisplayState("MODEL_ANALYZING");
       finishMeasurementIfReady();
     }
+    xSemaphoreGive(stateMutex);
   }
 }
 
@@ -1234,8 +1036,9 @@ void processingTask(void *parameter) {
 // Serial/control task (Arduino loop runs on Core 1)
 // ---------------------------------------------------------------------------
 void printStatus() {
-  serialPrintf("#STATUS,state=%s,measurement_id=%lu,captured=%u,processed=%u,piezo_rate=%lu,mpu_rate=%lu,baseline=%.3f,noise_rms=%.3f,threshold=%u,mpu=%d,address=0x%02X,who_am_i=0x%02X,mpu_model=%s,classifier=%s,core_acq=%d,core_process=%d\n",
+  serialPrintf("#STATUS,state=%s,measurement_id=%lu,captured=%u,processed=%u,accepted=%u,required=%u,piezo_rate=%lu,mpu_rate=%lu,baseline=%.3f,noise_rms=%.3f,threshold=%u,mpu=%d,address=0x%02X,who_am_i=0x%02X,mpu_model=%s,classifier=%s,core_acq=%d,core_process=%d\n",
     stateName(systemState), (unsigned long)activeMeasurementId, capturedHitCount, processedHitCount,
+    acceptedHitCount, HITS_PER_MEASUREMENT,
     (unsigned long)PIEZO_SAMPLE_RATE_HZ, (unsigned long)MPU_SAMPLE_RATE_HZ,
     piezoBaseline, piezoNoiseRms, piezoTriggerThreshold, mpuAvailable ? 1 : 0, activeMpuAddress,
     activeMpuWhoAmI, mpuAvailable ? mpuModelName() : "NONE", TINGGU_MODEL_VERSION,
@@ -1247,7 +1050,7 @@ void handleCommand(const char *command) {
   if (strcmp(command, "ARM_MEASUREMENT") == 0 || strcmp(command, "ARM") == 0) {
     if (armMeasurement()) {
       serialPrintf("#ACK,ARM_MEASUREMENT\n");
-      serialPrintf("#PROMPT,START_TEST,measurement_id=%lu,total_strikes=%u\n",
+      serialPrintf("#PROMPT,START_TEST,measurement_id=%lu,required_a_strikes=%u\n",
         (unsigned long)activeMeasurementId, HITS_PER_MEASUREMENT);
       announceStrikePreparation(1);
     } else {
@@ -1288,6 +1091,9 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(300);
   serialMutex = xSemaphoreCreateMutex();
+  bool oledFound = tingguDisplayBegin();
+  serialPrintf("#OLED,%s,SDA=8,SCL=9,address=0x%02X\n",
+    oledFound ? "READY" : "NOT_FOUND", tingguOledAddress);
   stateMutex = xSemaphoreCreateMutex();
   mpuMutex = xSemaphoreCreateMutex();
   freeBufferQueue = xQueueCreate(2, sizeof(uint8_t));
@@ -1302,6 +1108,9 @@ void setup() {
       (unsigned)sizeof(EventBuffer), (unsigned)ESP.getFreeHeap());
     return;
   }
+  modelSelfTestPassed=tingguModelStartupSelfTest(treeWorkspace);
+  serialPrintf("#MODEL_SELFTEST,%s,features=14,source=%s\n",modelSelfTestPassed?"PASS":"FAIL",TINGGU_SELFTEST_SOURCE);
+  if(!modelSelfTestPassed){systemState=STATE_FAULT;return;}
   uint8_t zero = 0, one = 1;
   xQueueSend(freeBufferQueue, &zero, 0);
   xQueueSend(freeBufferQueue, &one, 0);
@@ -1326,10 +1135,10 @@ void setup() {
       PIEZO_ADC_PIN, adcInitStage, esp_err_to_name(adcInitError));
     return;
   }
+  serialPrintf("#MODEL_CONTRACT,version=%s,features=14,piezo_rate=2000,event_rows=1400..2600,band_split_hz=100\n",TINGGU_MODEL_VERSION);
   serialPrintf("#ADC_DMA,READY,pin=%d,unit=%d,channel=%d\n",
     PIEZO_ADC_PIN, piezoAdcUnit == ADC_UNIT_1 ? 1 : 2, (int)piezoAdcChannel);
 
-  tingguDisplayBegin();
   resetCalibration();
   xTaskCreatePinnedToCore(mpuTask, "tinggu_mpu", 4096, NULL, 4, &mpuTaskHandle, 0);
   xTaskCreatePinnedToCore(acquisitionTask, "tinggu_acquisition", 6144, NULL, 5, &acquisitionTaskHandle, 0);
@@ -1364,7 +1173,9 @@ void loop() {
           (unsigned long)activeMeasurementId, event.hitNumber, (unsigned long)event.value);
         break;
       case EVENT_MEASUREMENT_TIMEOUT:
-        serialPrintf("#MEASUREMENT_INVALID,reason=HIT_TIMEOUT,next_strike=%u\n", event.hitNumber);
+        serialPrintf("#STRIKE_TIMEOUT,strike_index=%u,accepted_count=%u,required_count=%u\n",
+          event.hitNumber, acceptedHitCount, HITS_PER_MEASUREMENT);
+        beginNextStrikePreparation(acceptedHitCount + 1);
         break;
       case EVENT_DMA_OVERFLOW:
         serialPrintf("#WARNING,ADC_DMA_READ_ERROR,code=%lu\n", (unsigned long)event.value);
@@ -1382,7 +1193,7 @@ void loop() {
   if (ARM_BUTTON_PIN >= 0) {
     bool pressed = digitalRead(ARM_BUTTON_PIN) == (ARM_BUTTON_ACTIVE_LOW ? LOW : HIGH);
     if (pressed && !lastButton && armMeasurement()) {
-      serialPrintf("#PROMPT,START_TEST,measurement_id=%lu,total_strikes=%u\n",
+      serialPrintf("#PROMPT,START_TEST,measurement_id=%lu,required_a_strikes=%u\n",
         (unsigned long)activeMeasurementId, HITS_PER_MEASUREMENT);
       announceStrikePreparation(1);
     }
@@ -1395,5 +1206,7 @@ void loop() {
     tingguDisplayState(stateName(systemState));
     lastState = systemState;
   }
+  tingguDisplayProgress(acceptedHitCount, HITS_PER_MEASUREMENT);
+  tingguDisplayPoll();
   delay(2);
 }

@@ -1,0 +1,9 @@
+{
+  "fqbn": "esp32:esp32:esp32s3",
+  "esp32_core": "3.3.7",
+  "U8g2": "2.36.19",
+  "flash_bytes": 409628,
+  "global_ram_bytes": 124368,
+  "hardware_flashed": false,
+  "hardware_tested": false
+}

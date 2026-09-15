@@ -1,0 +1,65 @@
+{
+  "events": 289,
+  "node_population_match": true,
+  "replay_confusion": [
+    [
+      114,
+      1,
+      1
+    ],
+    [
+      0,
+      81,
+      4
+    ],
+    [
+      0,
+      10,
+      78
+    ]
+  ],
+  "replay_accuracy_not_test_accuracy": 0.9446366782006921,
+  "checks": {
+    "features": {
+      "cases": 289,
+      "prediction_mismatches": 0,
+      "max_abs_error": {
+        "peak_abs": 0.0,
+        "peak_time_ms": 0.0,
+        "rms_0_100ms": 0.0,
+        "rms_100_300ms": 0.0,
+        "dominant_freq_hz": 0.0,
+        "spectral_centroid_hz": 7.787548383930698e-12,
+        "low_high_energy_ratio": 1.1226575225009583e-12,
+        "decay_tau_ms": 1.750777300912887e-11,
+        "piezo_std": 2.4158453015843406e-13,
+        "accel_mag_mean": 4.218847493575595e-15,
+        "accel_mag_std": 1.6653345369377348e-15,
+        "gyro_mag_mean": 4.796163466380676e-14,
+        "gyro_mag_std": 7.105427357601002e-14,
+        "mpu_valid_ratio": 0.0
+      }
+    },
+    "adapter": {
+      "cases": 209,
+      "prediction_mismatches": 0,
+      "max_abs_error": {
+        "peak_abs": 0.0,
+        "peak_time_ms": 0.0,
+        "rms_0_100ms": 0.0,
+        "rms_100_300ms": 0.0,
+        "dominant_freq_hz": 0.0,
+        "spectral_centroid_hz": 7.332801033044234e-12,
+        "low_high_energy_ratio": 1.1226575225009583e-12,
+        "decay_tau_ms": 1.750777300912887e-11,
+        "piezo_std": 2.4158453015843406e-13,
+        "accel_mag_mean": 3.3306690738754696e-15,
+        "accel_mag_std": 1.6653345369377348e-15,
+        "gyro_mag_mean": 4.796163466380676e-14,
+        "gyro_mag_std": 7.105427357601002e-14,
+        "mpu_valid_ratio": 0.0
+      }
+    },
+    "units": "PASS startup raw-waveform golden, invalid input, 3-strike consensus/tie/invalid"
+  }
+}
