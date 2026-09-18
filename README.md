@@ -1,137 +1,136 @@
-# 听固（Tinggu）
+# 听固 Tinggu
 
-基于主动敲击与边缘 TinyML 的结构松动智能检测仪。
+听固是一个面向螺栓连接件的便携式主动敲击检测原型：用受控冲击激励结构，采集压电与 IMU 的瞬态响应，在 ESP32-S3 上提取波形特征并进行端侧 TinyML 推理。
 
-## 当前正式程序：14维决策树 + OLED（2026-09-15）
+当前仓库包含可编译的 Arduino 固件、14 维决策树模型、模型验证脚本、硬件接线文档和一个用于采集/分析串口数据的 Windows 工具。它适合复现实验、继续开发和进行原型验证；当前结果不等同于工业安全认证。
 
-使用 [Arduino完整程序与接线说明](firmware/tinggu_edge_runtime/README.md)。下载整个仓库后，用 Arduino IDE 打开 `firmware/tinggu_edge_runtime/tinggu_edge_runtime.ino`，保持同目录头文件完整。目标为 ESP32-S3，依赖 U8g2；压电 GPIO4，MPU SDA17/SCL15，OLED SDA8/SCL9，接线保持不变。
+## 当前版本
 
-新模型 `waveform_tree14_20260913_verified_20260915` 使用原始生产脚本的完整波形14维特征及 double 决策树。289条波形 Python/C++ 分类一致，209条连续记录通过固件采样适配器对照，ESP32-S3编译通过。94.46%是训练数据回放结果，不能当作独立测试准确率；尚未进行实物验证。上电应看到 `#MODEL_SELFTEST,PASS`，再发送 `ARM_MEASUREMENT`。
+当前主线固件位于 [`firmware/tinggu_edge_runtime`](firmware/tinggu_edge_runtime)，目标板为 ESP32-S3，显示设备为 SSD1306 128x64 I2C OLED，模型为 `waveform_tree14_20260913_verified_20260915`。
 
-[模型接入和验证说明](docs/model_integration_20260915.md) · [验证记录](models/20260913/firmware_verification_20260915/verification.json)
+一次测量的输出为：
 
-## 历史 OLED 发布版（2026-09-14）
+- `TIGHT`：牢固
+- `MEDIUM`：轻微松动
+- `LOOSE`：明显松动
+- `UNCERTAIN`：输入无效或置信度不足，需要重新测量
 
-[SSD1306 OLED完整程序与接线README](firmware/releases/oled_ssd1306_20260914/README.md)：包含ESP32-S3独立验屏程序和三次有效敲击测量程序。OLED接3V3/GND、SDA=GPIO8、SCL=GPIO9；使用U8g2库。已通过编译，现场验屏步骤见发布说明。本发布版仍使用原正式LDA模型。
+固件包含上电模型自检；只有串口输出 `#MODEL_SELFTEST,PASS` 后才应开始测量。
 
-## 项目简介
-
-听固通过独立供电的电磁撞针，对螺栓连接结构施加可重复的主动冲击；系统使用压电传感器和 IMU 采集瞬态振动响应，在 ESP32 端完成采样、频谱特征提取和轻量化模型推理，最终输出：
-
-- 牢固
-- 轻微松动
-- 明显松动
-- 测量无效
-
-项目的核心原则是：先让真实波形稳定产生，再用可解释的物理特征建立基线，最后将经过验证的模型部署到 ESP32。第一版不以深度学习为前提。
-
-## 目标指标
-
-- 单次测量与输出时间不超过 5 秒；
-- 标准试验板三档状态识别准确率目标不低于 85%；
-- 相同安装条件下，主共振峰频率变异系数目标不超过 5%；
-- 能通过重复敲击一致性、信号削顶、幅值异常等条件识别测量无效。
-
-上述指标需要以真实采集数据和最终硬件条件验证，不把仿真结果当作验收结果。
-
-## 系统闭环
+## 工作流程
 
 ```text
-用户启动测量
-    ↓
-外部按钮触发电磁撞针
-    ↓
-金属板/螺栓结构产生振铃
-    ↓
-压电传感器 + IMU 采集
-    ↓
-模拟前端 + ESP32 ADC
-    ↓
-触发、截窗、FFT、衰减与能量特征
-    ↓
-质量门控 → TinyML 分类
-    ↓
-OLED 显示结果
+受控主动敲击
+    -> 压电 + IMU 采集瞬态响应
+    -> ESP32-S3 触发、截窗与特征提取
+    -> 14 维决策树推理
+    -> 三次有效敲击融合
+    -> OLED 与串口输出结果
 ```
 
-软件侧建议采用“两级判定”：先判断这次测量是否有效，再对有效信号进行三分类。
+端侧模型使用以下 14 项特征，顺序固定在模型 JSON 与固件实现中：
 
 ```text
-原始波形 → 信号质量检查 → 特征向量 → 牢固/微松/明显松动
-                         ↘ 质量不合格 → 测量无效
+peak_abs, peak_time_ms, rms_0_100ms, rms_100_300ms,
+dominant_freq_hz, spectral_centroid_hz, low_high_energy_ratio,
+decay_tau_ms, piezo_std, accel_mag_mean, accel_mag_std,
+gyro_mag_mean, gyro_mag_std, mpu_valid_ratio
 ```
 
-## 初版模型方案
+详细算法契约见 [`docs/data_contract.md`](docs/data_contract.md)。
 
-候选特征：
+## 快速开始
 
-- `f1`：主共振峰频率；
-- `tau`：振铃衰减常数；
-- `Eratio`：高、低频段能量比；
-- `C`：多次敲击对齐后的归一化互相关一致性。
+### 1. 准备 Arduino 环境
 
-先使用 Python 完成可视化、特征分析和离线基线，优先比较规则阈值与 `DecisionTree`；随机森林或 SVM 仅作为离线对照。最终模型应满足 Python 与 ESP32 的特征顺序、缩放方式和输出结果一致，并通过固定的 golden vectors 回归测试。
+1. 克隆仓库并打开 `firmware/tinggu_edge_runtime/tinggu_edge_runtime.ino`。
+2. 在 Arduino IDE 中选择 `ESP32S3 Dev Module`。
+3. 安装 `U8g2` 库。当前固件曾在 U8g2 2.36.19、ESP32 Arduino Core 3.3.7 环境下编译验证。
+4. 保留同目录下的全部 `.h` 文件，不要把历史 OLED 发布版中的模型头文件与当前固件混用。
+5. 编译并上传；首次上电先检查串口自检和 MPU 初始化日志。
 
-不要预设松动后某个特征一定单调变化。连接刚度、阻尼、传感器安装和敲击能量都可能改变趋势，方向应由分批次实测数据验证。
+### 2. 接线
 
-## 目录结构
+| 模块 | ESP32-S3 接口 | 说明 |
+| --- | --- | --- |
+| 压电模拟前端 | GPIO4 / ADC1_CH3 | 输入范围目标为 0--3.3 V |
+| MPU（MPU-6050 外形，实测为 MPU-6500 兼容芯片） | SDA=GPIO17，SCL=GPIO15 | 3.3 V，地址 0x68 |
+| SSD1306 128x64 OLED | SDA=GPIO8，SCL=GPIO9 | 使用 `Wire1`，自动探测 0x3C/0x3D |
+| 电磁撞针 | 不连接 ESP32 功率回路 | 使用独立电源与控制器 |
+
+改线前断电。完整引脚、电源和模拟前端说明见 [`docs/hardware_pinout.md`](docs/hardware_pinout.md) 与 [`docs/tonight_bringup_wiring.md`](docs/tonight_bringup_wiring.md)。
+
+### 3. 运行测量
+
+串口设为 `460800` 波特率：
+
+1. 等待 `#MODEL_SELFTEST,PASS` 和 MPU 初始化完成。
+2. 发送 `ARM_MEASUREMENT` 并换行。
+3. 每次出现 `STRIKE NOW` 时触发外部撞针；完成三次有效敲击后读取分类结果。
+4. 使用 `ABORT` 取消当前测量，使用 `RECALIBRATE` 重新静置校准，使用 `STATUS` 查看状态。
+
+物理 ARM 按钮当前未启用；外部撞针由独立控制器负责，不能直接由 ESP32 供电。
+
+## 模型与验证
+
+推荐模型为 [`models/20260913/decision_tree_full.json`](models/20260913/decision_tree_full.json)。它是最大深度 4、最小叶节点样本数 3 的 CART 风格决策树。
+
+在 2026-09-11 数据批次上，按 `measurement_id` 分组的 5 折 OOF 结果为：
+
+| 指标 | 结果 | 口径 |
+| --- | ---: | --- |
+| 事件数 | 289 | 完整清洗数据集 |
+| 测量组数 | 114 | 同一测量的敲击不跨折 |
+| Accuracy | 87.89% | 分组 OOF |
+| Macro F1 | 86.83% | 分组 OOF |
+
+端侧移植验证还包括：
+
+- 289 条波形的 Python/C++ 特征与分类对照，分类差异为 0；
+- 209 条无时间缺口记录的固件 EventBuffer 适配对照，分类差异为 0；
+- ESP32-S3 目标编译与内置启动自检通过。
+
+289 条训练波形回放的命中率为 94.46%，这是训练数据回放结果，不是独立测试集准确率。项目已完成实物现场验收；README 只保留可复现的模型与端侧验证口径，具体现场记录以项目验收材料为准。
+
+模型训练和验证说明见 [`models/20260913/README.md`](models/20260913/README.md) 与 [`docs/model_integration_20260915.md`](docs/model_integration_20260915.md)。原始波形数据未提交到仓库。
+
+## 仓库结构
 
 ```text
 tinggu/
 ├── firmware/
-│   ├── tinggu_signal_validator/ # 单敲验证与PC采集固件
-│   └── tinggu_edge_runtime/     # 双核采集、14维决策树与三敲推理
-├── python/
-│   ├── collect.py    # 串口采集与原始数据保存
-│   ├── analyze.py    # 波形、频谱和特征分析
-│   ├── feature.py    # PC 端特征提取真值实现
-│   ├── train.py      # 模型训练与导出
-│   └── evaluate.py   # 按 session/批次划分的评估
-├── data/
-│   ├── raw/          # 原始采样数据，不提交大文件或隐私数据
-│   ├── processed/    # 清洗后的特征数据
-│   └── manifest.csv  # 数据、状态、安装条件和实验备注索引
-├── models/           # 训练产物、特征顺序和导出 C 代码
-├── tests/
-│   └── golden_vectors/ # Python/C 特征与推理回归样本
-├── docs/
-│   ├── requirements.md
-│   ├── data_contract.md
-│   ├── hardware_pinout.md
-│   └── decision_log.md
+│   ├── tinggu_edge_runtime/       # 当前 ESP32-S3 端侧程序
+│   ├── tinggu_signal_validator/   # 单次敲击与信号链验证固件
+│   └── releases/                  # 2026-09-14 OLED 历史发布版
+├── models/20260903/               # 历史 LDA/候选模型
+├── models/20260913/               # 当前 14 维决策树及验证产物
+├── scripts/                       # 特征、训练、验证和导出脚本
+├── tools/TingguSignalWorkbench/   # Windows 串口采集与分析工具
+├── docs/                          # 需求、数据契约、接线和验证记录
 └── README.md
 ```
 
-## 三人分工
+## 从数据复现模型
 
-- 机械：弹簧蓄能锤、限位和触发机构、传感器固定、标准螺栓试验台、敲击能量和重复性。
-- 硬件：ESP32、压电接口、偏置/限幅/滤波/放大、ADC/DMA、IMU、OLED、供电和布线。
-- 软件/模型：数据采集、信号处理、特征工程、质量门控、模型训练、Python/C 一致性、TinyML 部署和测试记录。
+训练脚本需要本地原始波形数据以及 `numpy`、`pandas`、`scikit-learn`、`matplotlib` 等依赖。数据集不随仓库分发，因此以下命令需要将路径替换为本地数据位置：
 
-## 20 天里程碑
+```powershell
+python models/20260913/train_waveform_14features.py `
+  --dataset D:\path\to\training_dataset_20260911 `
+  --outdir .\model_output
+```
 
-1. **第 1—3 天：数据链路** —— ESP32 能采集一次真实敲击并由电脑保存完整波形。
-2. **第 4—6 天：数据集** —— 三种松紧状态各至少 50 次，并记录安装条件；额外采集无效测量。
-3. **第 7—10 天：特征基线** —— 完成波形、FFT、衰减、特征分布和质量门控。
-4. **第 11—14 天：模型冻结** —— 选择轻量模型，完成 session 级测试和 Python/C 对照。
-5. **第 15—17 天：端侧部署** —— ESP32 完成采样、特征、推理和 OLED 显示。
-6. **第 18—20 天：闭环验收** —— 测量时间、准确率、重复性、无效识别和演示流程全部记录。
+若只需复核已提交模型与固件实现的一致性，可参考 [`docs/model_integration_20260915.md`](docs/model_integration_20260915.md) 中的验证命令；该流程不会自动获取或上传数据。
 
-## 开发约定
+## 相关文档
 
-- 数据集按 `session_id`、`setup_id`、`trial_id` 管理，测试集不能与训练集共享同一批次的相邻窗口。
-- 每次实验同时记录状态标签、螺栓松紧定义、传感器位置、敲击设置、采样率和异常备注。
-- 大型原始数据、构建产物、密钥和本地配置不提交仓库；必要时使用 Git LFS 或发布附件。
-- 任何采样率、FFT 点数、特征顺序、阈值和模型变化都记录在 `docs/decision_log.md`。
-- 参考 GitHub 项目只借鉴架构和方法，先检查许可证，再自行实现和验证。
+- [当前固件上传、接线与运行说明](firmware/tinggu_edge_runtime/README.md)
+- [硬件引脚与实物接口](docs/hardware_pinout.md)
+- [数据契约与 14 维特征接口](docs/data_contract.md)
+- [模型训练与分组验证](docs/model_training_20260913.md)
+- [模型接入与端侧验证](docs/model_integration_20260915.md)
+- [历史 OLED 发布版](firmware/releases/oled_ssd1306_20260914/README.md)
 
-## 当前启动顺序
+## 许可证
 
-1. 清点并拍照登记所有硬件，确认 ESP32、IMU、OLED 和模拟前端的准确型号。
-2. 填写 `docs/hardware_pinout.md` 和 `docs/data_contract.md`。
-3. 先用合成阻尼信号跑通 Python 特征流程。
-4. 硬件到位后优先完成一次真实波形采集，不急于训练复杂模型。
-
-## License
-
-项目许可证待团队确认。外部参考代码的许可证和来源应在 `docs/` 中单独记录。
+当前仓库尚未添加开源许可证。除非另有书面授权，仓库内容仍按著作权法保留全部权利；如需复用代码或模型，请先联系仓库作者。

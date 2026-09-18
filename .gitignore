@@ -22,8 +22,6 @@ sdkconfig.old
 data/raw/*
 data/processed/*
 models/generated/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
 
 # Local configuration and secrets
 .env
